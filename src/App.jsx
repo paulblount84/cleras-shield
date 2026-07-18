@@ -650,7 +650,8 @@ export default function CleraShieldCheckIn() {
     <div className="cs-root">
       <style>{`
         *, *::before, *::after { box-sizing: border-box; }
-        html, body { overflow-x: hidden; }
+        html, body { overflow-x: hidden; margin: 0; padding: 0; background: #0A0D12; }
+        #root { min-height: 100vh; background: #0A0D12; }
         .cs-root {
           --bg: #0A0D12;
           --panel: #12161D;
@@ -887,6 +888,9 @@ export default function CleraShieldCheckIn() {
         @media (min-width: 768px) {
           .cs-home-section { padding: 40px 0; }
           .cs-home-p { font-size: 16.5px; }
+          .cs-home-hero { text-align: center; }
+          .cs-home-hero .cs-home-p { margin-left: auto; margin-right: auto; }
+          .cs-home-hero .cs-home-cta { margin-left: auto; margin-right: auto; }
         }
         @media (min-width: 1024px) {
           .cs-home-h1 { font-size: 44px; }
