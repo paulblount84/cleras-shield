@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+vimport React, { useState, useMemo, useEffect } from "react";
 import {
   AreaChart,
   Area,
@@ -853,8 +853,7 @@ export default function CleraShieldCheckIn() {
         }
         .cs-home-closing { text-align: center; }
         .cs-home-closing .cs-home-h2 { font-size: 20px; margin-bottom: 20px; }
-        .cs-home-cta { display: flex; flex-direction: column; gap: 12px; margin-top: 32px; max-width: 420px; }
-        .cs-home-closing .cs-home-cta { margin-left: auto; margin-right: auto; }
+        .cs-home-cta { display: flex; flex-direction: column; gap: 12px; margin-top: 32px; }
         .cs-cta-primary {
           background: var(--sig-amber);
           color: #14100A;
