@@ -267,6 +267,105 @@ const ROLE_OPTIONS = [
   "Police Cadet",
 ];
 
+/* ---------- Homepage ---------- */
+
+function Homepage({ onGetStarted, onSignIn }) {
+  return (
+    <div className="cs-home">
+      <section id="overview" className="cs-home-section cs-home-hero">
+        <h1 className="cs-home-h1">Operational readiness, in under a minute.</h1>
+        <p className="cs-home-p">
+          Designed exclusively for first responders, Cleras helps you better understand how
+          sleep, stress, critical incidents, and recovery may be affecting your readiness.
+          Four quick questions provide a simple, private readiness signal; so you can
+          recognize small changes before they become bigger challenges.
+        </p>
+        <div className="cs-home-cta">
+          <button className="cs-cta-primary cs-full-width" onClick={onGetStarted}>
+            GET STARTED
+          </button>
+          <button className="cs-cta-secondary cs-full-width" onClick={onSignIn}>
+            SIGN IN
+          </button>
+        </div>
+      </section>
+
+      <section id="why-it-matters" className="cs-home-section">
+        <div className="cs-eyebrow">WHY IT MATTERS</div>
+        <h2 className="cs-home-h2">The job rarely gives you time to notice what it's taking from you.</h2>
+        <p className="cs-home-p">
+          Poor sleep, chronic stress, and repeated exposure to critical incidents don't
+          usually hit all at once, they build gradually over time. By the time you notice
+          the change, it may already be affecting your health, your performance, or life at
+          home. Cleras Shield gives you a quick, private check-in to help you recognize
+          those changes early and helps navigate you to next care steps.
+        </p>
+      </section>
+
+      <section id="how-it-works" className="cs-home-section">
+        <div className="cs-eyebrow">HOW IT WORKS</div>
+        <h2 className="cs-home-h2">Four questions. One readiness signal.</h2>
+        <p className="cs-home-p">
+          Your daily check-in takes about a minute. You'll answer four simple questions
+          about your sleep, current stress, exposure to critical incidents, and how
+          recovered you feel heading into your shift. Together, those responses generate
+          your personalized Readiness Index and a Green, Amber, or Red Readiness Status, a
+          familiar color system that provides an easy-to-understand snapshot of how you're
+          doing today. Over time, your daily check-ins build a history of your readiness,
+          helping you recognize trends and catch small changes before they become bigger
+          challenges.
+        </p>
+        <div className="cs-condition-dist" style={{ marginTop: 20 }}>
+          <div className="cs-dist-chip" style={{ color: "var(--sig-green)" }}>
+            GREEN
+          </div>
+          <div className="cs-dist-chip" style={{ color: "var(--sig-amber)" }}>
+            AMBER
+          </div>
+          <div className="cs-dist-chip" style={{ color: "var(--sig-red)" }}>
+            RED
+          </div>
+        </div>
+      </section>
+
+      <section id="privacy-security" className="cs-home-section">
+        <div className="cs-eyebrow">PRIVACY & SECURITY</div>
+        <h2 className="cs-home-h2">Your check-ins are yours and yours alone.</h2>
+        <p className="cs-home-p">
+          Your responses are protected using industry-standard security practices so only
+          you can access your personal check-in history. Your individual answers are never
+          shared with command staff, supervisors, or your agency. This information exists
+          to help you better understand your own well-being.
+        </p>
+      </section>
+
+      <section id="who-its-for" className="cs-home-section">
+        <div className="cs-eyebrow">WHO IT'S FOR</div>
+        <h2 className="cs-home-h2">Built for the people who run toward it.</h2>
+        <p className="cs-home-p">
+          Cleras Shield was built specifically for public safety dispatchers, police
+          officers, custody officers, and sheriff's deputies to provide a simple, private
+          way to check in before every shift. In about a minute, you'll receive a
+          personalized Readiness Index based on how you're sleeping, recovering, managing
+          stress, and responding to the demands of the job.
+        </p>
+      </section>
+
+      <section className="cs-home-section cs-home-closing">
+        <h2 className="cs-home-h2">One minute could help you notice what the job has been quietly changing.</h2>
+        <div className="cs-home-cta">
+          <button className="cs-cta-primary cs-full-width" onClick={onGetStarted}>
+            GET STARTED
+          </button>
+          <button className="cs-cta-secondary cs-full-width" onClick={onSignIn}>
+            SIGN IN
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 /* ---------- Main ---------- */
 
 export default function CleraShieldCheckIn() {
@@ -274,7 +373,10 @@ export default function CleraShieldCheckIn() {
   const [authMode, setAuthMode] = useState("signin");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
-  const [authRole, setAuthRole] = useState(ROLE_OPTIONS[0]);
+  const [authRole, setAuthRole] = useState("");
+  const [page, setPage] = useState("home"); // 'home' | 'auth' — only relevant when signed out
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [pendingScroll, setPendingScroll] = useState(null);
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
@@ -359,12 +461,40 @@ export default function CleraShieldCheckIn() {
     setSession(null);
     setHistory({});
     setView("checkin");
+    setPage("home");
     resetToIntro();
     setAuthEmail("");
     setAuthPassword("");
     setAuthNotice("");
     setAuthError("");
   }
+
+  const NAV_ITEMS = [
+    { id: "overview", label: "Overview" },
+    { id: "why-it-matters", label: "Why It Matters" },
+    { id: "how-it-works", label: "How It Works" },
+    { id: "privacy-security", label: "Privacy & Security" },
+    { id: "who-its-for", label: "Who It's For" },
+    { id: "signin", label: "Sign In" },
+  ];
+
+  function handleNavClick(id) {
+    if (id === "signin") {
+      setPage("auth");
+    } else {
+      setPage("home");
+      setPendingScroll(id);
+    }
+    setMenuOpen(false);
+  }
+
+  useEffect(() => {
+    if (page === "home" && pendingScroll) {
+      const el = document.getElementById(pendingScroll);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      setPendingScroll(null);
+    }
+  }, [page, pendingScroll]);
 
   const totalSteps = ALL_STEPS.length;
   const isQuestion = view === "checkin" && step >= 0 && step < totalSteps;
@@ -547,11 +677,19 @@ export default function CleraShieldCheckIn() {
           .cs-h1 { font-size: 31.5px; }
           .cs-card { padding: 34px 30px; }
         }
+        @media (min-width: 768px) {
+          .cs-shell { max-width: 500px; }
+          .cs-shell-home { max-width: 640px; }
+        }
         @media (min-width: 1024px) {
           .cs-root { align-items: center; }
           .cs-shell { max-width: 520px; }
+          .cs-shell-home { max-width: 760px; }
           .cs-card { padding: 40px 36px; }
           .cs-pct { font-size: 45px; }
+        }
+        @media (min-width: 1280px) {
+          .cs-shell-home { max-width: 860px; }
         }
         .cs-topbar { display: flex; align-items: baseline; justify-content: space-between; padding-bottom: 18px; border-bottom: 1px solid var(--panel-border); margin-bottom: 20px; }
         .cs-wordmark { font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 17px; letter-spacing: 0.14em; color: var(--text-primary); }
@@ -642,6 +780,119 @@ export default function CleraShieldCheckIn() {
         .cs-field input, .cs-field select { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 14px; color: var(--text-primary); font-family: 'Inter', sans-serif; font-size: 15.5px; }
         .cs-field input:focus, .cs-field select:focus { outline: none; border-color: var(--sig-amber); }
         .cs-full-width { width: 100%; }
+
+        .cs-hamburger {
+          width: 34px;
+          height: 34px;
+          background: #171C24;
+          border: 1px solid var(--panel-border);
+          border-radius: 3px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 4px;
+          cursor: pointer;
+        }
+        .cs-hamburger span { width: 16px; height: 2px; background: var(--text-primary); border-radius: 1px; }
+
+        .cs-nav-menu {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          background: var(--panel);
+          border: 1px solid var(--panel-border);
+          border-radius: 4px;
+          padding: 10px;
+          margin-bottom: 20px;
+        }
+        .cs-nav-item {
+          text-align: left;
+          background: transparent;
+          border: none;
+          color: var(--text-primary);
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 13px;
+          letter-spacing: 0.04em;
+          padding: 12px 10px;
+          border-radius: 3px;
+          cursor: pointer;
+        }
+        .cs-nav-item:hover { background: #1C222C; color: var(--sig-amber); }
+
+        .cs-home { display: flex; flex-direction: column; gap: 0; }
+        .cs-home-section {
+          padding: 30px 0;
+          border-bottom: 1px solid var(--panel-border);
+        }
+        .cs-home-section:last-child { border-bottom: none; }
+        .cs-home-hero { padding-top: 8px; }
+        .cs-home-h1 {
+          font-family: 'Oswald', sans-serif;
+          font-weight: 500;
+          font-size: 32px;
+          line-height: 1.2;
+          margin: 0 0 16px 0;
+          color: var(--text-primary);
+        }
+        .cs-home-h2 {
+          font-family: 'Oswald', sans-serif;
+          font-weight: 500;
+          font-size: 22px;
+          line-height: 1.3;
+          margin: 0 0 14px 0;
+          color: var(--text-primary);
+        }
+        .cs-home-p {
+          color: var(--text-muted);
+          font-size: 15.5px;
+          line-height: 1.65;
+          margin: 0;
+          max-width: 640px;
+        }
+        .cs-home-closing { text-align: center; }
+        .cs-home-closing .cs-home-h2 { font-size: 20px; margin-bottom: 20px; }
+        .cs-home-cta { display: flex; flex-direction: column; gap: 12px; margin-top: 32px; max-width: 420px; }
+        .cs-home-closing .cs-home-cta { margin-left: auto; margin-right: auto; }
+        .cs-cta-primary {
+          background: var(--sig-amber);
+          color: #14100A;
+          border: none;
+          border-radius: 3px;
+          padding: 16px;
+          font-family: 'Oswald', sans-serif;
+          font-weight: 600;
+          font-size: 15.5px;
+          letter-spacing: 0.08em;
+          cursor: pointer;
+        }
+        .cs-cta-primary:hover { filter: brightness(1.05); }
+        .cs-cta-secondary {
+          background: transparent;
+          color: var(--text-primary);
+          border: 1px solid var(--panel-border);
+          border-radius: 3px;
+          padding: 16px;
+          font-family: 'Oswald', sans-serif;
+          font-weight: 600;
+          font-size: 15.5px;
+          letter-spacing: 0.08em;
+          cursor: pointer;
+        }
+        .cs-cta-secondary:hover { border-color: var(--sig-amber); color: var(--sig-amber); }
+        @media (min-width: 640px) {
+          .cs-home-h1 { font-size: 38px; }
+          .cs-home-h2 { font-size: 25px; }
+        }
+        @media (min-width: 768px) {
+          .cs-home-section { padding: 40px 0; }
+          .cs-home-p { font-size: 16.5px; }
+        }
+        @media (min-width: 1024px) {
+          .cs-home-h1 { font-size: 44px; }
+          .cs-home-h2 { font-size: 27px; }
+          .cs-home-section { padding: 48px 0; }
+        }
         .cs-auth-error { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--sig-red); margin-bottom: 14px; line-height: 1.5; }
         .cs-auth-notice { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--sig-green); margin-bottom: 14px; line-height: 1.5; }
         .cs-auth-toggle { text-align: center; margin-top: 14px; font-size: 14px; color: var(--text-muted); }
@@ -653,9 +904,15 @@ export default function CleraShieldCheckIn() {
         href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
       />
 
-      <div className="cs-shell">
+      <div className={`cs-shell ${!session && page === "home" ? "cs-shell-home" : ""}`}>
         <div className="cs-topbar">
-          <div className="cs-wordmark">
+          <div
+            className="cs-wordmark"
+            style={{ cursor: !session ? "pointer" : "default" }}
+            onClick={() => {
+              if (!session) setPage("home");
+            }}
+          >
             CLERAS <span>SHIELD</span>
           </div>
           {session ? (
@@ -670,15 +927,49 @@ export default function CleraShieldCheckIn() {
               </button>
             </div>
           ) : (
-            <div className="cs-clock">
-              {dateStr}
-              <br />
-              {timeStr}
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <div className="cs-clock">
+                {dateStr}
+                <br />
+                {timeStr}
+              </div>
+              <button
+                className="cs-hamburger"
+                onClick={() => setMenuOpen((o) => !o)}
+                aria-label="Menu"
+              >
+                <span />
+                <span />
+                <span />
+              </button>
             </div>
           )}
         </div>
 
-        {!session && (
+        {!session && menuOpen && (
+          <div className="cs-nav-menu">
+            {NAV_ITEMS.map((item) => (
+              <button key={item.id} className="cs-nav-item" onClick={() => handleNavClick(item.id)}>
+                {item.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {!session && page === "home" && (
+          <Homepage
+            onGetStarted={() => {
+              setAuthMode("signup");
+              setPage("auth");
+            }}
+            onSignIn={() => {
+              setAuthMode("signin");
+              setPage("auth");
+            }}
+          />
+        )}
+
+        {!session && page === "auth" && (
           <div className="cs-body">
             <div className="cs-card">
               <h1 className="cs-h1">
@@ -717,7 +1008,10 @@ export default function CleraShieldCheckIn() {
                 {authMode === "signup" && (
                   <div className="cs-field">
                     <label>ROLE</label>
-                    <select value={authRole} onChange={(e) => setAuthRole(e.target.value)}>
+                    <select value={authRole} onChange={(e) => setAuthRole(e.target.value)} required>
+                      <option value="" disabled>
+                        Choose your Role
+                      </option>
                       {ROLE_OPTIONS.map((r) => (
                         <option key={r} value={r}>
                           {r}
