@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import {
   AreaChart,
   Area,
@@ -86,6 +86,60 @@ async function logoutRequest(accessToken) {
   }
 }
 
+/* ---------- TOTP MFA ---------- */
+
+async function fetchUserFactors(accessToken) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error("Could not check two-factor status.");
+  return data.factors || [];
+}
+
+async function enrollTotpFactor(accessToken) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/factors`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ factor_type: "totp" }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error_description || data.msg || "Could not start two-factor setup.");
+  return data; // { id, totp: { qr_code, secret, uri } }
+}
+
+async function unenrollFactor(accessToken, factorId) {
+  try {
+    await fetch(`${SUPABASE_URL}/auth/v1/factors/${factorId}`, {
+      method: "DELETE",
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    });
+  } catch (e) {
+    /* best-effort cleanup of an abandoned/unverified factor, not critical */
+  }
+}
+
+async function createMfaChallenge(accessToken, factorId) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/factors/${factorId}/challenge`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error_description || data.msg || "Could not start verification.");
+  return data; // { id, expires_at }
+}
+
+async function verifyMfaChallenge(accessToken, factorId, challengeId, code) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/factors/${factorId}/verify`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ challenge_id: challengeId, code }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error("That code didn't match. Try again.");
+  return data; // new aal2 session: { access_token, refresh_token, expires_in, user }
+}
+
 async function fetchCheckIns(accessToken, fromDate) {
   // No user_id filter here on purpose — RLS identifies the caller server-side.
   // Adding one client-side would be cosmetic, not a security control.
@@ -93,14 +147,19 @@ async function fetchCheckIns(accessToken, fromDate) {
   const res = await fetch(url, {
     headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
   });
-  if (!res.ok) throw new Error("Failed to load check-ins");
+  if (!res.ok) {
+    const err = new Error("Failed to load check-ins");
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
-async function submitCheckIn(accessToken, { sleepScore, stressScore, recoveryScore, incidentLabel, incidentFlag }) {
-  // The browser never sends readiness_index or condition — those are computed
-  // server-side inside this RPC, which is the only way the check_ins table can
-  // be written to at all (direct INSERT/UPDATE privileges are revoked).
+async function submitCheckIn(accessToken, { sleepScore, stressScore, recoveryScore, incidentLabel }) {
+  // The browser sends only raw answer choices. readiness_index, condition,
+  // incident_flag, and check_date are all computed/derived server-side inside
+  // this RPC — the only way the check_ins table can be written to at all
+  // (direct INSERT/UPDATE privileges are revoked).
   const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/submit_check_in`, {
     method: "POST",
     headers: {
@@ -113,16 +172,17 @@ async function submitCheckIn(accessToken, { sleepScore, stressScore, recoverySco
       p_stress_score: stressScore,
       p_recovery_score: recoveryScore,
       p_incident_label: incidentLabel,
-      p_incident_flag: incidentFlag,
     }),
   });
   const data = await res.json();
   if (!res.ok) {
     const raw = (data && (data.message || data.hint)) || "";
-    if (raw.includes("already checked in")) {
-      throw new Error("You've already checked in today.");
+    if (raw.includes("24 hours")) {
+      throw new Error("You can check in again 24 hours after your last check-in.");
     }
-    throw new Error("Could not save your check-in. Please try again.");
+    const err = new Error("Could not save your check-in. Please try again.");
+    err.status = res.status;
+    throw err;
   }
   return Array.isArray(data) ? data[0] : data;
 }
@@ -132,22 +192,31 @@ async function fetchInterventionCompletions(accessToken) {
   const res = await fetch(url, {
     headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
   });
-  if (!res.ok) throw new Error("Failed to load intervention history");
+  if (!res.ok) {
+    const err = new Error("Failed to load intervention history");
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
-async function logInterventionCompletion(accessToken, userId, interventionId) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/intervention_completions`, {
+async function logInterventionCompletion(accessToken, interventionId) {
+  // Same pattern as check-ins: user_id is never sent by the client, the RPC
+  // derives it from auth.uid(). Direct INSERT on the table is revoked.
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/log_intervention_completion`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
-      Prefer: "return=minimal",
     },
-    body: JSON.stringify([{ user_id: userId, intervention_id: interventionId }]),
+    body: JSON.stringify({ p_intervention_id: interventionId }),
   });
-  if (!res.ok) throw new Error("Failed to log completion");
+  if (!res.ok) {
+    const err = new Error("Failed to log completion");
+    err.status = res.status;
+    throw err;
+  }
 }
 
 /* ---------- Scoring model ---------- */
@@ -649,6 +718,20 @@ export default function CleraShieldCheckIn() {
   const [authNotice, setAuthNotice] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
 
+  // MFA step-up state. `pendingSession` holds an aal1 session obtained from
+  // primary sign-in/sign-up while a second factor is being resolved — it is
+  // never treated as the "real" session (never fed to authedRequest/history
+  // loading) until MFA is satisfied or explicitly skipped.
+  const [mfaStage, setMfaStage] = useState(null); // null | 'offer' | 'setup' | 'challenge'
+  const [pendingSession, setPendingSession] = useState(null);
+  const [mfaFactorId, setMfaFactorId] = useState(null);
+  const [mfaChallengeId, setMfaChallengeId] = useState(null);
+  const [mfaQrSvg, setMfaQrSvg] = useState("");
+  const [mfaSecret, setMfaSecret] = useState("");
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaError, setMfaError] = useState("");
+  const [mfaLoading, setMfaLoading] = useState(false);
+
   const [view, setView] = useState("checkin");
   const [step, setStep] = useState(-1);
   const [values, setValues] = useState({});
@@ -665,6 +748,19 @@ export default function CleraShieldCheckIn() {
   const [interventionStepIndex, setInterventionStepIndex] = useState(0);
   const [breathingCycles, setBreathingCycles] = useState(0);
   const [completionCounts, setCompletionCounts] = useState({});
+
+  // sessionRef mirrors `session` for use inside async callbacks, which would
+  // otherwise close over a stale value. authEpochRef increments on every
+  // sign-in and sign-out; any in-flight refresh checks its captured epoch
+  // before applying its result, so a refresh started before logout (or before
+  // a *different* login) can never resurrect/overwrite the wrong session.
+  const sessionRef = useRef(null);
+  const authEpochRef = useRef(0);
+  const refreshingRef = useRef(null);
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
 
   useEffect(() => {
     const t = setInterval(() => setClock(new Date()), 1000);
@@ -687,22 +783,69 @@ export default function CleraShieldCheckIn() {
     };
   }
 
-  // Refresh the access token shortly before it expires. If the refresh itself
-  // fails (revoked, expired refresh token, etc.), the session is cleared —
-  // silently continuing on a dead token would just produce confusing 401s.
+  // Single-flight refresh: concurrent callers (the proactive timer and any
+  // 401-triggered retry) share the same in-flight promise instead of firing
+  // duplicate refresh requests, which would race to rotate the refresh token
+  // and could invalidate each other.
+  async function refreshSession() {
+    if (refreshingRef.current) return refreshingRef.current;
+    const epochAtStart = authEpochRef.current;
+    const current = sessionRef.current;
+    if (!current) throw new Error("Not authenticated");
+
+    refreshingRef.current = (async () => {
+      try {
+        const data = await refreshSessionRequest(current.refreshToken);
+        const next = buildSession(data);
+        // Only apply this result if nothing logged out/in again while it was in flight.
+        if (authEpochRef.current === epochAtStart) {
+          setSession(next);
+          sessionRef.current = next;
+        }
+        return next;
+      } catch (e) {
+        if (authEpochRef.current === epochAtStart) {
+          setSession(null);
+          sessionRef.current = null;
+          setAuthError("Your session expired. Please sign in again.");
+          setPage("auth");
+          setAuthMode("signin");
+        }
+        throw e;
+      } finally {
+        refreshingRef.current = null;
+      }
+    })();
+
+    return refreshingRef.current;
+  }
+
+  // Wraps a data call: uses the current token, and on a 401 (which can still
+  // happen even with proactive refresh — e.g. a backgrounded mobile tab
+  // throttling timers) refreshes exactly once and retries exactly once.
+  async function authedRequest(fn) {
+    const current = sessionRef.current;
+    if (!current) throw new Error("Not authenticated");
+    try {
+      return await fn(current.accessToken);
+    } catch (e) {
+      if (e.status === 401) {
+        const refreshed = await refreshSession();
+        return await fn(refreshed.accessToken);
+      }
+      throw e;
+    }
+  }
+
+  // Proactively refresh shortly before expiry so a normal, foregrounded
+  // session never has to hit the 401-retry path at all.
   useEffect(() => {
     if (!session) return;
     const msUntilRefresh = Math.max(session.expiresAt - Date.now() - 60000, 5000);
-    const t = setTimeout(async () => {
-      try {
-        const data = await refreshSessionRequest(session.refreshToken);
-        setSession(buildSession(data));
-      } catch (e) {
-        setSession(null);
-        setAuthError("Your session expired. Please sign in again.");
-        setPage("auth");
-        setAuthMode("signin");
-      }
+    const t = setTimeout(() => {
+      refreshSession().catch(() => {
+        /* refreshSession already clears state and surfaces an error on failure */
+      });
     }, msUntilRefresh);
     return () => clearTimeout(t);
   }, [session]);
@@ -714,7 +857,7 @@ export default function CleraShieldCheckIn() {
       try {
         const from = new Date();
         from.setDate(from.getDate() - 13);
-        const rows = await fetchCheckIns(session.accessToken, dateKey(from));
+        const rows = await authedRequest((token) => fetchCheckIns(token, dateKey(from)));
         const h = {};
         rows.forEach((r) => {
           h[r.check_date] = {
@@ -740,7 +883,7 @@ export default function CleraShieldCheckIn() {
     if (!session) return;
     (async () => {
       try {
-        const rows = await fetchInterventionCompletions(session.accessToken);
+        const rows = await authedRequest((token) => fetchInterventionCompletions(token));
         const counts = {};
         rows.forEach((r) => {
           counts[r.intervention_id] = (counts[r.intervention_id] || 0) + 1;
@@ -752,6 +895,53 @@ export default function CleraShieldCheckIn() {
     })();
   }, [session]);
 
+  function finalizeSession(sessionObj) {
+    authEpochRef.current += 1;
+    sessionRef.current = sessionObj;
+    setSession(sessionObj);
+    setMfaStage(null);
+    setPendingSession(null);
+    setMfaFactorId(null);
+    setMfaChallengeId(null);
+    setMfaQrSvg("");
+    setMfaSecret("");
+    setMfaCode("");
+    setMfaError("");
+    setMfaLoading(false);
+  }
+
+  async function handlePostPrimaryAuth(data) {
+    const pending = buildSession(data); // aal1 — not yet the "real" session
+    let factors = [];
+    try {
+      factors = await fetchUserFactors(pending.accessToken);
+    } catch (e) {
+      // Fail open on a transient factor-check error rather than locking the
+      // person out of an app they just correctly authenticated into.
+      finalizeSession(pending);
+      return;
+    }
+    const verifiedTotp = factors.find((f) => f.factor_type === "totp" && f.status === "verified");
+
+    if (verifiedTotp) {
+      setPendingSession(pending);
+      setMfaFactorId(verifiedTotp.id);
+      setMfaStage("challenge");
+      try {
+        const challenge = await createMfaChallenge(pending.accessToken, verifiedTotp.id);
+        setMfaChallengeId(challenge.id);
+      } catch (e) {
+        setMfaError("Could not start verification. Try again.");
+      }
+      return;
+    }
+
+    // No factor enrolled yet — offer setup, but it's skippable so nobody gets
+    // permanently locked out of the app by this rollout.
+    setPendingSession(pending);
+    setMfaStage("offer");
+  }
+
   async function handleAuthSubmit(e) {
     e.preventDefault();
     setAuthError("");
@@ -761,14 +951,14 @@ export default function CleraShieldCheckIn() {
       if (authMode === "signup") {
         const data = await signUpRequest(authEmail, authPassword, authRole);
         if (data.access_token && data.user) {
-          setSession(buildSession(data));
+          await handlePostPrimaryAuth(data);
         } else {
           setAuthNotice("Account created. Check your email to confirm it, then sign in.");
           setAuthMode("signin");
         }
       } else {
         const data = await signInRequest(authEmail, authPassword);
-        setSession(buildSession(data));
+        await handlePostPrimaryAuth(data);
       }
     } catch (err) {
       setAuthError(mapAuthError(err.raw || err.message, authMode === "signin" ? "signin" : "signup"));
@@ -777,11 +967,85 @@ export default function CleraShieldCheckIn() {
     }
   }
 
+  function cancelMfa() {
+    if (pendingSession) {
+      logoutRequest(pendingSession.accessToken);
+      if (mfaStage === "setup" && mfaFactorId) {
+        unenrollFactor(pendingSession.accessToken, mfaFactorId);
+      }
+    }
+    setMfaStage(null);
+    setPendingSession(null);
+    setMfaFactorId(null);
+    setMfaChallengeId(null);
+    setMfaQrSvg("");
+    setMfaSecret("");
+    setMfaCode("");
+    setMfaError("");
+  }
+
+  function skipMfaSetup() {
+    if (pendingSession) finalizeSession(pendingSession);
+  }
+
+  async function startMfaSetup() {
+    setMfaError("");
+    setMfaLoading(true);
+    try {
+      const enrolled = await enrollTotpFactor(pendingSession.accessToken);
+      setMfaFactorId(enrolled.id);
+      setMfaQrSvg((enrolled.totp && enrolled.totp.qr_code) || "");
+      setMfaSecret((enrolled.totp && enrolled.totp.secret) || "");
+      setMfaStage("setup");
+    } catch (e) {
+      setMfaError(e.message || "Could not start two-factor setup.");
+    } finally {
+      setMfaLoading(false);
+    }
+  }
+
+  async function submitMfaSetupCode() {
+    setMfaError("");
+    setMfaLoading(true);
+    try {
+      const challenge = await createMfaChallenge(pendingSession.accessToken, mfaFactorId);
+      const verified = await verifyMfaChallenge(pendingSession.accessToken, mfaFactorId, challenge.id, mfaCode);
+      finalizeSession(buildSession(verified));
+    } catch (e) {
+      setMfaError(e.message || "That code didn't match. Try again.");
+      setMfaLoading(false);
+    }
+  }
+
+  async function submitMfaChallengeCode() {
+    setMfaError("");
+    setMfaLoading(true);
+    try {
+      let challengeId = mfaChallengeId;
+      if (!challengeId) {
+        const challenge = await createMfaChallenge(pendingSession.accessToken, mfaFactorId);
+        challengeId = challenge.id;
+        setMfaChallengeId(challengeId);
+      }
+      const verified = await verifyMfaChallenge(pendingSession.accessToken, mfaFactorId, challengeId, mfaCode);
+      finalizeSession(buildSession(verified));
+    } catch (e) {
+      setMfaError(e.message || "That code didn't match. Try again.");
+      setMfaCode("");
+      setMfaLoading(false);
+    }
+  }
+
   async function signOut() {
     const accessToken = session && session.accessToken;
-    // Clear local state first so the UI responds instantly regardless of
+    // Bump the epoch first: any refresh already in flight will see this new
+    // epoch when it resolves and discard its own result instead of reviving
+    // a session that's about to be cleared.
+    authEpochRef.current += 1;
+    // Clear local state next so the UI responds instantly regardless of
     // whether the network call below succeeds — per the "clear state even if
     // logout fails" requirement.
+    sessionRef.current = null;
     setSession(null);
     setHistory({});
     setView("checkin");
@@ -793,6 +1057,14 @@ export default function CleraShieldCheckIn() {
     setAuthError("");
     setCompletionCounts({});
     closeIntervention();
+    setMfaStage(null);
+    setPendingSession(null);
+    setMfaFactorId(null);
+    setMfaChallengeId(null);
+    setMfaQrSvg("");
+    setMfaSecret("");
+    setMfaCode("");
+    setMfaError("");
     if (accessToken) {
       logoutRequest(accessToken);
     }
@@ -860,13 +1132,14 @@ export default function CleraShieldCheckIn() {
   async function finishCheckIn() {
     setSaveError("");
     try {
-      const saved = await submitCheckIn(session.accessToken, {
-        sleepScore: values.sleep ?? 0,
-        stressScore: values.stress ?? 0,
-        recoveryScore: values.recovery ?? 0,
-        incidentLabel: incidentLabel ?? "None",
-        incidentFlag,
-      });
+      const saved = await authedRequest((token) =>
+        submitCheckIn(token, {
+          sleepScore: values.sleep ?? 0,
+          stressScore: values.stress ?? 0,
+          recoveryScore: values.recovery ?? 0,
+          incidentLabel: incidentLabel ?? "None",
+        })
+      );
       // Trust only what the server computed and returned — not the client-side
       // preview values used to render the result screen a moment ago.
       const key = saved.check_date;
@@ -915,7 +1188,7 @@ export default function CleraShieldCheckIn() {
     setCompletionCounts((prev) => ({ ...prev, [id]: (prev[id] || 0) + 1 }));
     if (session) {
       try {
-        await logInterventionCompletion(session.accessToken, session.userId, id);
+        await authedRequest((token) => logInterventionCompletion(token, id));
       } catch (e) {
         /* non-critical, completion still shown locally */
       }
@@ -1223,6 +1496,25 @@ export default function CleraShieldCheckIn() {
         .cs-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
         .cs-field label { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; letter-spacing: 0.08em; color: var(--text-muted); }
         .cs-field-hint { font-size: 11.5px; color: var(--text-muted); margin-top: 4px; }
+        .cs-mfa-qr {
+          background: #FFFFFF;
+          border-radius: 4px;
+          padding: 16px;
+          display: flex;
+          justify-content: center;
+          margin: 8px 0 16px 0;
+        }
+        .cs-mfa-qr svg { width: 100%; max-width: 200px; height: auto; }
+        .cs-mfa-secret {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          font-size: 12.5px;
+          color: var(--text-muted);
+          text-align: center;
+          line-height: 1.6;
+          margin-bottom: 20px;
+          word-break: break-all;
+        }
+        .cs-mfa-secret b { color: var(--text-primary); letter-spacing: 0.04em; }
         .cs-field input, .cs-field select { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 14px; color: var(--text-primary); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15.5px; }
         .cs-field input:focus, .cs-field select:focus { outline: none; border-color: var(--sig-amber); }
         .cs-full-width { width: 100%; }
@@ -1412,81 +1704,179 @@ export default function CleraShieldCheckIn() {
 
         {!session && page === "auth" && (
           <div className="cs-body">
-            <div className="cs-card">
-              <h1 className="cs-h1">
-                {authMode === "signin" ? "Welcome back." : "Set up your account."}
-              </h1>
-              <p className="cs-sub">
-                Your responses are protected with industry standard security, ensuring that
-                only you have access to your personal check-in history.
-              </p>
+            {!mfaStage && (
+              <div className="cs-card">
+                <h1 className="cs-h1">
+                  {authMode === "signin" ? "Welcome back." : "Set up your account."}
+                </h1>
+                <p className="cs-sub">
+                  Your responses are protected with industry standard security, ensuring that
+                  only you have access to your personal check-in history.
+                </p>
 
-              {authError && <div className="cs-auth-error">{authError}</div>}
-              {authNotice && <div className="cs-auth-notice">{authNotice}</div>}
+                {authError && <div className="cs-auth-error">{authError}</div>}
+                {authNotice && <div className="cs-auth-notice">{authNotice}</div>}
 
-              <form onSubmit={handleAuthSubmit}>
-                <div className="cs-field">
-                  <label>EMAIL</label>
-                  <input
-                    type="email"
-                    required
-                    value={authEmail}
-                    onChange={(e) => setAuthEmail(e.target.value)}
-                    autoComplete="email"
-                  />
-                </div>
-                <div className="cs-field">
-                  <label>PASSWORD</label>
-                  <input
-                    type="password"
-                    required
-                    minLength={12}
-                    value={authPassword}
-                    onChange={(e) => setAuthPassword(e.target.value)}
-                    autoComplete={authMode === "signin" ? "current-password" : "new-password"}
-                  />
+                <form onSubmit={handleAuthSubmit}>
+                  <div className="cs-field">
+                    <label>EMAIL</label>
+                    <input
+                      type="email"
+                      required
+                      value={authEmail}
+                      onChange={(e) => setAuthEmail(e.target.value)}
+                      autoComplete="email"
+                    />
+                  </div>
+                  <div className="cs-field">
+                    <label>PASSWORD</label>
+                    <input
+                      type="password"
+                      required
+                      minLength={12}
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      autoComplete={authMode === "signin" ? "current-password" : "new-password"}
+                    />
+                    {authMode === "signup" && (
+                      <div className="cs-field-hint">At least 12 characters.</div>
+                    )}
+                  </div>
                   {authMode === "signup" && (
-                    <div className="cs-field-hint">At least 12 characters.</div>
+                    <div className="cs-field">
+                      <label>ROLE</label>
+                      <select value={authRole} onChange={(e) => setAuthRole(e.target.value)} required>
+                        <option value="" disabled>
+                          Choose your Role
+                        </option>
+                        {ROLE_OPTIONS.map((r) => (
+                          <option key={r} value={r}>
+                            {r}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  <button className="cs-begin-btn cs-full-width" type="submit" disabled={authLoading}>
+                    {authLoading ? "WORKING…" : authMode === "signin" ? "SIGN IN" : "CREATE ACCOUNT"}
+                  </button>
+                </form>
+
+                <div className="cs-auth-toggle">
+                  {authMode === "signin" ? (
+                    <>
+                      Need an account?{" "}
+                      <button onClick={() => { setAuthMode("signup"); setAuthError(""); setAuthNotice(""); }}>
+                        Sign up
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      Already have one?{" "}
+                      <button onClick={() => { setAuthMode("signin"); setAuthError(""); setAuthNotice(""); }}>
+                        Sign in
+                      </button>
+                    </>
                   )}
                 </div>
-                {authMode === "signup" && (
-                  <div className="cs-field">
-                    <label>ROLE</label>
-                    <select value={authRole} onChange={(e) => setAuthRole(e.target.value)} required>
-                      <option value="" disabled>
-                        Choose your Role
-                      </option>
-                      {ROLE_OPTIONS.map((r) => (
-                        <option key={r} value={r}>
-                          {r}
-                        </option>
-                      ))}
-                    </select>
+              </div>
+            )}
+
+            {mfaStage === "offer" && (
+              <div className="cs-card">
+                <div className="cs-eyebrow">TWO-FACTOR AUTHENTICATION</div>
+                <h1 className="cs-h1">Add an extra layer of security?</h1>
+                <p className="cs-sub">
+                  With two-factor authentication on, signing in also requires a code from an
+                  authenticator app on your phone — so a leaked password alone isn't enough
+                  to get into your account.
+                </p>
+                {mfaError && <div className="cs-auth-error">{mfaError}</div>}
+                <button className="cs-begin-btn cs-full-width" onClick={startMfaSetup} disabled={mfaLoading}>
+                  {mfaLoading ? "WORKING…" : "SET UP NOW"}
+                </button>
+                <button className="cs-secondary-btn" onClick={skipMfaSetup} disabled={mfaLoading}>
+                  Skip for now
+                </button>
+              </div>
+            )}
+
+            {mfaStage === "setup" && (
+              <div className="cs-card">
+                <div className="cs-eyebrow">TWO-FACTOR AUTHENTICATION</div>
+                <h1 className="cs-h1">Scan this with an authenticator app.</h1>
+                <p className="cs-sub">
+                  Use Google Authenticator, Authy, 1Password, or similar. Then enter the
+                  6-digit code it shows below.
+                </p>
+                {mfaQrSvg && (
+                  <div className="cs-mfa-qr" dangerouslySetInnerHTML={{ __html: mfaQrSvg }} />
+                )}
+                {mfaSecret && (
+                  <div className="cs-mfa-secret">
+                    Can't scan it? Enter this code manually:
+                    <br />
+                    <b>{mfaSecret}</b>
                   </div>
                 )}
-                <button className="cs-begin-btn cs-full-width" type="submit" disabled={authLoading}>
-                  {authLoading ? "WORKING…" : authMode === "signin" ? "SIGN IN" : "CREATE ACCOUNT"}
+                {mfaError && <div className="cs-auth-error">{mfaError}</div>}
+                <div className="cs-field">
+                  <label>6-DIGIT CODE</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
+                  />
+                </div>
+                <button
+                  className="cs-begin-btn cs-full-width"
+                  onClick={submitMfaSetupCode}
+                  disabled={mfaLoading || mfaCode.length !== 6}
+                >
+                  {mfaLoading ? "VERIFYING…" : "ENABLE"}
                 </button>
-              </form>
-
-              <div className="cs-auth-toggle">
-                {authMode === "signin" ? (
-                  <>
-                    Need an account?{" "}
-                    <button onClick={() => { setAuthMode("signup"); setAuthError(""); setAuthNotice(""); }}>
-                      Sign up
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    Already have one?{" "}
-                    <button onClick={() => { setAuthMode("signin"); setAuthError(""); setAuthNotice(""); }}>
-                      Sign in
-                    </button>
-                  </>
-                )}
+                <button className="cs-secondary-btn" onClick={cancelMfa} disabled={mfaLoading}>
+                  Cancel
+                </button>
               </div>
-            </div>
+            )}
+
+            {mfaStage === "challenge" && (
+              <div className="cs-card">
+                <div className="cs-eyebrow">TWO-FACTOR AUTHENTICATION</div>
+                <h1 className="cs-h1">Enter your verification code.</h1>
+                <p className="cs-sub">
+                  Open your authenticator app and enter the 6-digit code for Cleras Shield.
+                </p>
+                {mfaError && <div className="cs-auth-error">{mfaError}</div>}
+                <div className="cs-field">
+                  <label>6-DIGIT CODE</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
+                    autoFocus
+                  />
+                </div>
+                <button
+                  className="cs-begin-btn cs-full-width"
+                  onClick={submitMfaChallengeCode}
+                  disabled={mfaLoading || mfaCode.length !== 6}
+                >
+                  {mfaLoading ? "VERIFYING…" : "VERIFY"}
+                </button>
+                <button className="cs-secondary-btn" onClick={cancelMfa} disabled={mfaLoading}>
+                  Use a different account
+                </button>
+              </div>
+            )}
+
             <div className="cs-footer-note">
               Cleras Shield · Operational Readiness Platform · Confidential to you
             </div>
