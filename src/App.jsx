@@ -26,6 +26,12 @@ const SUPABASE_ANON_KEY = "sb_publishable_uFpL72MpnDQGNJtXVYrP5A_oRUodxp7";
 const CHECK_IN_COLUMNS =
   "check_date,readiness_index,condition,sleep_score,stress_score,recovery_score,incident_flag,incident_label,created_at";
 
+function qrCodeToImageSrc(qr) {
+  if (!qr) return "";
+  if (qr.startsWith("data:")) return qr; // already a usable data URL
+  return `data:image/svg+xml;utf8,${encodeURIComponent(qr)}`; // raw SVG markup — encode it ourselves
+}
+
 function mapAuthError(rawMessage, context) {
   // Never surface raw Supabase/Postgres error internals to the person using the app.
   if (context === "signin") return "Unable to sign in with those credentials.";
@@ -2024,7 +2030,7 @@ export default function CleraShieldCheckIn() {
                 </p>
                 {mfaQrSvg && (
                   <div className="cs-mfa-qr">
-                    <img src={mfaQrSvg} alt="Two-factor authentication QR code" />
+                    <img src={qrCodeToImageSrc(mfaQrSvg)} alt="Two-factor authentication QR code" />
                   </div>
                 )}
                 {mfaSecret && (
