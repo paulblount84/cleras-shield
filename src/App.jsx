@@ -317,8 +317,7 @@ const ALL_STEPS = [QUESTIONS[0], QUESTIONS[1], INCIDENT_QUESTION, QUESTIONS[2]];
 const INTERVENTIONS = [
   {
     id: "paced-breathing",
-    category: "In The Moment",
-    modality: "CBT / DBT",
+    modalities: ["CBT", "DBT"],
     title: "Paced Breathing",
     duration: "~1 min",
     blurb: "Slow your exhale to bring your heart rate down.",
@@ -329,8 +328,7 @@ const INTERVENTIONS = [
   },
   {
     id: "tipp",
-    category: "In The Moment",
-    modality: "DBT",
+    modalities: ["DBT"],
     title: "TIPP",
     duration: "~3 min",
     blurb: "For genuinely acute distress, right after a hard call.",
@@ -344,8 +342,7 @@ const INTERVENTIONS = [
   },
   {
     id: "grounding-54321",
-    category: "In The Moment",
-    modality: "DBT / ACT",
+    modalities: ["DBT", "ACT"],
     title: "5-4-3-2-1 Grounding",
     duration: "~2 min",
     blurb: "Interrupt a spiral and land back in the present.",
@@ -360,8 +357,7 @@ const INTERVENTIONS = [
   },
   {
     id: "stop-skill",
-    category: "In The Moment",
-    modality: "DBT",
+    modalities: ["DBT"],
     title: "STOP Skill",
     duration: "~1 min",
     blurb: "For when you're about to react and shouldn't.",
@@ -375,8 +371,7 @@ const INTERVENTIONS = [
   },
   {
     id: "quick-thought-check",
-    category: "Reframe A Thought",
-    modality: "CBT",
+    modalities: ["CBT"],
     title: "Quick Thought Check",
     duration: "~2 min",
     blurb: "A condensed thought record for a shift, not a therapy session.",
@@ -390,8 +385,7 @@ const INTERVENTIONS = [
   },
   {
     id: "spot-the-distortion",
-    category: "Reframe A Thought",
-    modality: "CBT",
+    modalities: ["CBT"],
     title: "Spot The Distortion",
     duration: "~1 min",
     blurb: "A quick reference for recognizing unhelpful thinking patterns.",
@@ -406,8 +400,7 @@ const INTERVENTIONS = [
   },
   {
     id: "name-it",
-    category: "Values & Acceptance",
-    modality: "ACT",
+    modalities: ["ACT"],
     title: "Name It",
     duration: "~1 min",
     blurb: "Create distance from a thought that's stuck.",
@@ -420,8 +413,7 @@ const INTERVENTIONS = [
   },
   {
     id: "radical-acceptance",
-    category: "Values & Acceptance",
-    modality: "DBT",
+    modalities: ["DBT"],
     title: "Radical Acceptance",
     duration: "~2 min",
     blurb: "For something that already happened and can't be changed.",
@@ -434,8 +426,7 @@ const INTERVENTIONS = [
   },
   {
     id: "values-checkin",
-    category: "Values & Acceptance",
-    modality: "ACT",
+    modalities: ["ACT"],
     title: "Values Check-In",
     duration: "~2 min",
     blurb: "For a low-motivation day — reconnect with what matters.",
@@ -448,7 +439,11 @@ const INTERVENTIONS = [
   },
 ];
 
-const INTERVENTION_CATEGORIES = ["In The Moment", "Reframe A Thought", "Values & Acceptance"];
+const INTERVENTION_DOMAINS = [
+  { id: "CBT", label: "CBT", full: "Cognitive Behavioral Therapy" },
+  { id: "DBT", label: "DBT", full: "Dialectical Behavior Therapy" },
+  { id: "ACT", label: "ACT", full: "Acceptance & Commitment Therapy" },
+];
 
 function suggestedInterventionIds(pct, incidentFlag) {
   if (incidentFlag) return ["tipp", "radical-acceptance"];
@@ -796,6 +791,7 @@ export default function CleraShieldCheckIn() {
   const [interventionStepIndex, setInterventionStepIndex] = useState(0);
   const [breathingCycles, setBreathingCycles] = useState(0);
   const [completionCounts, setCompletionCounts] = useState({});
+  const [openDomains, setOpenDomains] = useState({ CBT: true, DBT: false, ACT: false });
 
   // sessionRef mirrors `session` for use inside async callbacks, which would
   // otherwise close over a stale value. authEpochRef increments on every
@@ -1288,6 +1284,10 @@ export default function CleraShieldCheckIn() {
     }
   }
 
+  function toggleDomain(domainId) {
+    setOpenDomains((prev) => ({ ...prev, [domainId]: !prev[domainId] }));
+  }
+
   function openIntervention(id) {
     setActiveInterventionId(id);
     setInterventionStepIndex(0);
@@ -1552,14 +1552,46 @@ export default function CleraShieldCheckIn() {
         }
         .cs-breathe-cycles { margin-top: 18px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; color: var(--text-muted); letter-spacing: 0.06em; }
 
-        .cs-intervention-group { margin-top: 26px; }
-        .cs-intervention-group-label {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-          font-size: 11px;
-          letter-spacing: 0.14em;
-          color: var(--text-muted);
-          margin-bottom: 10px;
+        .cs-domain-group {
+          margin-top: 14px;
+          border: 1px solid var(--panel-border);
+          border-radius: 3px;
+          overflow: hidden;
         }
+        .cs-domain-header {
+          width: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          background: #171C24;
+          border: none;
+          padding: 14px 16px;
+          cursor: pointer;
+          text-align: left;
+        }
+        .cs-domain-header:hover { background: #1C222C; }
+        .cs-domain-label {
+          font-family: 'Oswald', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+          font-weight: 600;
+          font-size: 15.5px;
+          letter-spacing: 0.06em;
+          color: var(--text-primary);
+        }
+        .cs-domain-full {
+          font-size: 12px;
+          color: var(--text-muted);
+          margin-top: 2px;
+        }
+        .cs-domain-caret {
+          color: var(--sig-amber);
+          font-size: 14px;
+          transition: transform 200ms ease;
+          transform: rotate(-90deg);
+          flex-shrink: 0;
+        }
+        .cs-domain-caret.open { transform: rotate(0deg); }
+        .cs-domain-body { padding: 14px; background: var(--panel); }
+        .cs-domain-body .cs-intervention-card:last-child { margin-bottom: 0; }
         .cs-intervention-card {
           width: 100%;
           text-align: left;
@@ -2409,28 +2441,46 @@ export default function CleraShieldCheckIn() {
                     Short, evidence-informed exercises drawn from CBT, DBT, and ACT. Nothing
                     you do here is saved — only that you did it.
                   </p>
-                  {INTERVENTION_CATEGORIES.map((cat) => (
-                    <div key={cat} className="cs-intervention-group">
-                      <div className="cs-intervention-group-label">{cat}</div>
-                      {INTERVENTIONS.filter((iv) => iv.category === cat).map((iv) => (
+                  {INTERVENTION_DOMAINS.map((domain) => {
+                    const isOpen = !!openDomains[domain.id];
+                    const items = INTERVENTIONS.filter((iv) => iv.modalities.includes(domain.id));
+                    return (
+                      <div key={domain.id} className="cs-domain-group">
                         <button
-                          key={iv.id}
-                          className="cs-intervention-card"
-                          onClick={() => openIntervention(iv.id)}
+                          className="cs-domain-header"
+                          onClick={() => toggleDomain(domain.id)}
+                          aria-expanded={isOpen}
                         >
-                          <div className="cs-intervention-card-top">
-                            <span className="cs-intervention-title">{iv.title}</span>
-                            <span className="cs-intervention-duration">{iv.duration}</span>
+                          <div>
+                            <div className="cs-domain-label">{domain.label}</div>
+                            <div className="cs-domain-full">{domain.full}</div>
                           </div>
-                          <div className="cs-intervention-blurb">{iv.blurb}</div>
-                          <div className="cs-intervention-modality">
-                            {iv.modality}
-                            {completionCounts[iv.id] ? ` · Done ${completionCounts[iv.id]}×` : ""}
-                          </div>
+                          <span className={`cs-domain-caret ${isOpen ? "open" : ""}`}>▾</span>
                         </button>
-                      ))}
-                    </div>
-                  ))}
+                        {isOpen && (
+                          <div className="cs-domain-body">
+                            {items.map((iv) => (
+                              <button
+                                key={iv.id}
+                                className="cs-intervention-card"
+                                onClick={() => openIntervention(iv.id)}
+                              >
+                                <div className="cs-intervention-card-top">
+                                  <span className="cs-intervention-title">{iv.title}</span>
+                                  <span className="cs-intervention-duration">{iv.duration}</span>
+                                </div>
+                                <div className="cs-intervention-blurb">{iv.blurb}</div>
+                                <div className="cs-intervention-modality">
+                                  {iv.modalities.join(" / ")}
+                                  {completionCounts[iv.id] ? ` · Done ${completionCounts[iv.id]}×` : ""}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 
@@ -2441,7 +2491,7 @@ export default function CleraShieldCheckIn() {
                 return (
                   <div className="cs-card">
                     <div className="cs-eyebrow">
-                      {iv.title.toUpperCase()} · {iv.modality}
+                      {iv.title.toUpperCase()} · {iv.modalities.join(" / ")}
                     </div>
                     {iv.type === "breathing" ? (
                       <>
