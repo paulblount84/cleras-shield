@@ -21,15 +21,44 @@ import {
 const SUPABASE_URL = "https://rayuaqfwcxzqwekbrpbs.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_uFpL72MpnDQGNJtXVYrP5A_oRUodxp7";
 
+// Columns the browser is actually allowed to SELECT (matches the column-level
+// GRANTs in the database — this list isn't just cosmetic, the server enforces it).
+const CHECK_IN_COLUMNS =
+  "check_date,readiness_index,condition,sleep_score,stress_score,recovery_score,incident_flag,incident_label,created_at";
+
+function mapAuthError(rawMessage, context) {
+  // Never surface raw Supabase/Postgres error internals to the person using the app.
+  if (context === "signin") return "Unable to sign in with those credentials.";
+  const msg = (rawMessage || "").toLowerCase();
+  if (msg.includes("already registered") || msg.includes("already exists")) {
+    return "That email may already have an account. Try signing in instead.";
+  }
+  if (msg.includes("password")) {
+    return "Password must be at least 12 characters.";
+  }
+  if (msg.includes("email") && msg.includes("invalid")) {
+    return "Enter a valid email address.";
+  }
+  return "Something went wrong. Please try again.";
+}
+
 async function authRequest(path, body) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
     method: "POST",
     headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const data = await res.json();
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    data = {};
+  }
   if (!res.ok) {
-    throw new Error(data.error_description || data.msg || data.error || "Authentication failed");
+    const raw = data && (data.error_description || data.msg || data.error);
+    const err = new Error(raw || "Authentication failed");
+    err.raw = raw;
+    throw err;
   }
   return data;
 }
@@ -42,8 +71,25 @@ function signInRequest(email, password) {
   return authRequest("token?grant_type=password", { email, password });
 }
 
-async function fetchCheckIns(accessToken, userId, fromDate) {
-  const url = `${SUPABASE_URL}/rest/v1/check_ins?select=*&user_id=eq.${userId}&check_date=gte.${fromDate}&order=check_date.asc`;
+function refreshSessionRequest(refreshToken) {
+  return authRequest("token?grant_type=refresh_token", { refresh_token: refreshToken });
+}
+
+async function logoutRequest(accessToken) {
+  try {
+    await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+    });
+  } catch (e) {
+    // Even if the network call fails, the caller clears local session state anyway.
+  }
+}
+
+async function fetchCheckIns(accessToken, fromDate) {
+  // No user_id filter here on purpose — RLS identifies the caller server-side.
+  // Adding one client-side would be cosmetic, not a security control.
+  const url = `${SUPABASE_URL}/rest/v1/check_ins?select=${CHECK_IN_COLUMNS}&check_date=gte.${fromDate}&order=check_date.asc`;
   const res = await fetch(url, {
     headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
   });
@@ -51,24 +97,38 @@ async function fetchCheckIns(accessToken, userId, fromDate) {
   return res.json();
 }
 
-async function upsertCheckIn(accessToken, entry) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/check_ins?on_conflict=user_id,check_date`, {
+async function submitCheckIn(accessToken, { sleepScore, stressScore, recoveryScore, incidentLabel, incidentFlag }) {
+  // The browser never sends readiness_index or condition — those are computed
+  // server-side inside this RPC, which is the only way the check_ins table can
+  // be written to at all (direct INSERT/UPDATE privileges are revoked).
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/submit_check_in`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates,return=representation",
     },
-    body: JSON.stringify([entry]),
+    body: JSON.stringify({
+      p_sleep_score: sleepScore,
+      p_stress_score: stressScore,
+      p_recovery_score: recoveryScore,
+      p_incident_label: incidentLabel,
+      p_incident_flag: incidentFlag,
+    }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.message || "Failed to save check-in");
-  return data;
+  if (!res.ok) {
+    const raw = (data && (data.message || data.hint)) || "";
+    if (raw.includes("already checked in")) {
+      throw new Error("You've already checked in today.");
+    }
+    throw new Error("Could not save your check-in. Please try again.");
+  }
+  return Array.isArray(data) ? data[0] : data;
 }
 
-async function fetchInterventionCompletions(accessToken, userId) {
-  const url = `${SUPABASE_URL}/rest/v1/intervention_completions?select=intervention_id,completed_at&user_id=eq.${userId}`;
+async function fetchInterventionCompletions(accessToken) {
+  const url = `${SUPABASE_URL}/rest/v1/intervention_completions?select=intervention_id,completed_at`;
   const res = await fetch(url, {
     headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
   });
@@ -453,7 +513,7 @@ function TrendTooltip({ active, payload, label }) {
         border: "1px solid #232B35",
         borderRadius: 3,
         padding: "8px 10px",
-        fontFamily: "'IBM Plex Mono', monospace",
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         fontSize: 11,
       }}
     >
@@ -577,7 +637,7 @@ function Homepage({ onGetStarted, onSignIn }) {
 /* ---------- Main ---------- */
 
 export default function CleraShieldCheckIn() {
-  const [session, setSession] = useState(null); // { accessToken, userId, email } — memory only
+  const [session, setSession] = useState(null); // { accessToken, refreshToken, expiresAt, userId, email } — memory only
   const [authMode, setAuthMode] = useState("signin");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -616,6 +676,37 @@ export default function CleraShieldCheckIn() {
     return () => clearInterval(t);
   }, []);
 
+  function buildSession(data) {
+    const expiresInMs = (data.expires_in || 3600) * 1000;
+    return {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresAt: Date.now() + expiresInMs,
+      userId: data.user.id,
+      email: data.user.email,
+    };
+  }
+
+  // Refresh the access token shortly before it expires. If the refresh itself
+  // fails (revoked, expired refresh token, etc.), the session is cleared —
+  // silently continuing on a dead token would just produce confusing 401s.
+  useEffect(() => {
+    if (!session) return;
+    const msUntilRefresh = Math.max(session.expiresAt - Date.now() - 60000, 5000);
+    const t = setTimeout(async () => {
+      try {
+        const data = await refreshSessionRequest(session.refreshToken);
+        setSession(buildSession(data));
+      } catch (e) {
+        setSession(null);
+        setAuthError("Your session expired. Please sign in again.");
+        setPage("auth");
+        setAuthMode("signin");
+      }
+    }, msUntilRefresh);
+    return () => clearTimeout(t);
+  }, [session]);
+
   useEffect(() => {
     if (!session) return;
     (async () => {
@@ -623,7 +714,7 @@ export default function CleraShieldCheckIn() {
       try {
         const from = new Date();
         from.setDate(from.getDate() - 13);
-        const rows = await fetchCheckIns(session.accessToken, session.userId, dateKey(from));
+        const rows = await fetchCheckIns(session.accessToken, dateKey(from));
         const h = {};
         rows.forEach((r) => {
           h[r.check_date] = {
@@ -649,7 +740,7 @@ export default function CleraShieldCheckIn() {
     if (!session) return;
     (async () => {
       try {
-        const rows = await fetchInterventionCompletions(session.accessToken, session.userId);
+        const rows = await fetchInterventionCompletions(session.accessToken);
         const counts = {};
         rows.forEach((r) => {
           counts[r.intervention_id] = (counts[r.intervention_id] || 0) + 1;
@@ -670,23 +761,27 @@ export default function CleraShieldCheckIn() {
       if (authMode === "signup") {
         const data = await signUpRequest(authEmail, authPassword, authRole);
         if (data.access_token && data.user) {
-          setSession({ accessToken: data.access_token, userId: data.user.id, email: data.user.email });
+          setSession(buildSession(data));
         } else {
           setAuthNotice("Account created. Check your email to confirm it, then sign in.");
           setAuthMode("signin");
         }
       } else {
         const data = await signInRequest(authEmail, authPassword);
-        setSession({ accessToken: data.access_token, userId: data.user.id, email: data.user.email });
+        setSession(buildSession(data));
       }
     } catch (err) {
-      setAuthError(err.message);
+      setAuthError(mapAuthError(err.raw || err.message, authMode === "signin" ? "signin" : "signup"));
     } finally {
       setAuthLoading(false);
     }
   }
 
-  function signOut() {
+  async function signOut() {
+    const accessToken = session && session.accessToken;
+    // Clear local state first so the UI responds instantly regardless of
+    // whether the network call below succeeds — per the "clear state even if
+    // logout fails" requirement.
     setSession(null);
     setHistory({});
     setView("checkin");
@@ -698,6 +793,9 @@ export default function CleraShieldCheckIn() {
     setAuthError("");
     setCompletionCounts({});
     closeIntervention();
+    if (accessToken) {
+      logoutRequest(accessToken);
+    }
   }
 
   const NAV_ITEMS = [
@@ -760,39 +858,34 @@ export default function CleraShieldCheckIn() {
   }
 
   async function finishCheckIn() {
-    const key = dateKey(new Date());
-    const cond = getCondition(pct);
-    const row = {
-      user_id: session.userId,
-      check_date: key,
-      sleep_score: values.sleep ?? 0,
-      stress_score: values.stress ?? 0,
-      recovery_score: values.recovery ?? 0,
-      readiness_index: pct,
-      condition: cond.dbValue,
-      incident_flag: incidentFlag,
-      incident_label: incidentLabel,
-    };
     setSaveError("");
     try {
-      const saved = await upsertCheckIn(session.accessToken, row);
-      const createdAt = saved && saved[0] && saved[0].created_at ? saved[0].created_at : new Date().toISOString();
+      const saved = await submitCheckIn(session.accessToken, {
+        sleepScore: values.sleep ?? 0,
+        stressScore: values.stress ?? 0,
+        recoveryScore: values.recovery ?? 0,
+        incidentLabel: incidentLabel ?? "None",
+        incidentFlag,
+      });
+      // Trust only what the server computed and returned — not the client-side
+      // preview values used to render the result screen a moment ago.
+      const key = saved.check_date;
       setHistory((prev) => ({
         ...prev,
         [key]: {
           date: key,
-          pct,
-          sleep: row.sleep_score,
-          stress: row.stress_score,
-          recovery: row.recovery_score,
-          incidentFlag,
-          createdAt,
+          pct: saved.readiness_index,
+          sleep: saved.sleep_score,
+          stress: saved.stress_score,
+          recovery: saved.recovery_score,
+          incidentFlag: saved.incident_flag,
+          createdAt: saved.created_at,
         },
       }));
       resetToIntro();
       setView("trends");
     } catch (e) {
-      setSaveError("Could not save to Supabase. Your check-in was not logged — try again.");
+      setSaveError(e.message || "Could not save your check-in. Please try again.");
     }
   }
 
@@ -931,7 +1024,7 @@ export default function CleraShieldCheckIn() {
           background: var(--bg);
           background-image: radial-gradient(circle at 50% 0%, rgba(232,179,63,0.05), transparent 55%);
           color: var(--text-primary);
-          font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
           display: flex;
           justify-content: center;
           padding: max(32px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
@@ -957,11 +1050,11 @@ export default function CleraShieldCheckIn() {
           .cs-shell-home { max-width: 860px; }
         }
         .cs-topbar { display: flex; align-items: baseline; justify-content: space-between; padding-bottom: 18px; border-bottom: 1px solid var(--panel-border); margin-bottom: 20px; }
-        .cs-wordmark { font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 17px; letter-spacing: 0.14em; color: var(--text-primary); }
+        .cs-wordmark { font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif; font-weight: 600; font-size: 17px; letter-spacing: 0.14em; color: var(--text-primary); }
         .cs-wordmark span { color: var(--sig-amber); }
-        .cs-clock { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--text-muted); letter-spacing: 0.03em; text-align: right; }
+        .cs-clock { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; color: var(--text-muted); letter-spacing: 0.03em; text-align: right; }
         .cs-signout {
-          font-family: 'IBM Plex Mono', monospace;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
           font-size: 13.5px;
           letter-spacing: 0.06em;
           color: var(--text-muted);
@@ -974,7 +1067,7 @@ export default function CleraShieldCheckIn() {
         }
         .cs-signout:hover { color: var(--text-primary); border-color: var(--text-muted); }
         .cs-tabs { display: flex; gap: 8px; margin-bottom: 20px; }
-        .cs-tab { flex: 1; text-align: center; padding: 10px; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; letter-spacing: 0.1em; border: 1px solid var(--panel-border); border-radius: 3px; background: transparent; color: var(--text-muted); cursor: pointer; }
+        .cs-tab { flex: 1; text-align: center; padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; letter-spacing: 0.1em; border: 1px solid var(--panel-border); border-radius: 3px; background: transparent; color: var(--text-muted); cursor: pointer; }
         .cs-tab.active { border-color: var(--sig-amber); color: var(--text-primary); background: #171C24; }
         .cs-progress { display: flex; gap: 6px; margin-bottom: 28px; }
         .cs-seg { flex: 1; height: 4px; border-radius: 2px; background: var(--panel-border); overflow: hidden; }
@@ -984,46 +1077,46 @@ export default function CleraShieldCheckIn() {
         .cs-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 4px; padding: 28px 24px; flex: 1; display: flex; flex-direction: column; }
         .cs-card-compact { flex: 0 0 auto; }
         .cs-card-compact .cs-begin-btn { margin-top: 10px; }
-        .cs-eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; letter-spacing: 0.18em; color: var(--sig-amber); margin-bottom: 14px; }
-        .cs-h1 { font-family: 'Oswald', sans-serif; font-weight: 500; font-size: 29px; line-height: 1.25; margin: 0 0 8px 0; color: var(--text-primary); }
+        .cs-eyebrow { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; letter-spacing: 0.18em; color: var(--sig-amber); margin-bottom: 14px; }
+        .cs-h1 { font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif; font-weight: 500; font-size: 29px; line-height: 1.25; margin: 0 0 8px 0; color: var(--text-primary); }
         .cs-sub { color: var(--text-muted); font-size: 15.5px; line-height: 1.5; margin: 0 0 28px 0; }
         .cs-options { display: flex; flex-direction: column; gap: 10px; }
-        .cs-opt { text-align: left; background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 16px 18px; color: var(--text-primary); font-family: 'Inter', sans-serif; cursor: pointer; display: flex; flex-direction: column; gap: 2px; transition: border-color 150ms, background 150ms, transform 100ms; }
+        .cs-opt { text-align: left; background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 16px 18px; color: var(--text-primary); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; cursor: pointer; display: flex; flex-direction: column; gap: 2px; transition: border-color 150ms, background 150ms, transform 100ms; }
         .cs-opt:hover { border-color: var(--sig-amber); background: #1C222C; }
         .cs-opt:active { transform: scale(0.99); }
         .cs-opt-label { font-size: 17px; font-weight: 600; }
         .cs-opt-sub { font-size: 14px; color: var(--text-muted); }
-        .cs-begin-btn { margin-top: auto; background: var(--sig-amber); color: #14100A; border: none; border-radius: 3px; padding: 16px; font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 15.5px; letter-spacing: 0.08em; cursor: pointer; }
+        .cs-begin-btn { margin-top: auto; background: var(--sig-amber); color: #14100A; border: none; border-radius: 3px; padding: 16px; font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif; font-weight: 600; font-size: 15.5px; letter-spacing: 0.08em; cursor: pointer; }
         .cs-begin-btn:hover { filter: brightness(1.05); }
         .cs-begin-btn:disabled { opacity: 0.6; cursor: default; }
-        .cs-secondary-btn { margin-top: 12px; background: transparent; color: var(--text-muted); border: 1px solid var(--panel-border); border-radius: 3px; padding: 14px; font-family: 'Inter', sans-serif; font-size: 14.5px; cursor: pointer; }
+        .cs-secondary-btn { margin-top: 12px; background: transparent; color: var(--text-muted); border: 1px solid var(--panel-border); border-radius: 3px; padding: 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14.5px; cursor: pointer; }
         .cs-secondary-btn:hover { color: var(--text-primary); border-color: var(--text-muted); }
         .gauge-wrap { display: flex; justify-content: center; margin: 6px 0 4px 0; }
         .gauge-svg { width: 100%; max-width: 280px; }
         .cs-readout { text-align: center; margin-top: -46px; margin-bottom: 18px; }
-        .cs-pct { font-family: 'IBM Plex Mono', monospace; font-size: 38px; font-weight: 600; line-height: 1; }
-        .cs-pct-label { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-muted); letter-spacing: 0.14em; margin-top: 4px; }
-        .cs-condition-badge { font-family: 'IBM Plex Mono', monospace; font-size: 13.5px; letter-spacing: 0.12em; padding: 6px 12px; border-radius: 2px; display: inline-block; margin-bottom: 16px; border: 1px solid currentColor; }
+        .cs-pct { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 38px; font-weight: 600; line-height: 1; }
+        .cs-pct-label { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--text-muted); letter-spacing: 0.14em; margin-top: 4px; }
+        .cs-condition-badge { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13.5px; letter-spacing: 0.12em; padding: 6px 12px; border-radius: 2px; display: inline-block; margin-bottom: 16px; border: 1px solid currentColor; }
         .cs-incident-banner { display: flex; align-items: center; gap: 10px; background: rgba(214, 72, 74, 0.1); border: 1px solid var(--sig-red); border-radius: 3px; padding: 12px 14px; margin-bottom: 20px; }
         .cs-incident-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--sig-red); flex-shrink: 0; }
         .cs-incident-text { font-size: 14px; line-height: 1.4; }
-        .cs-incident-text b { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; letter-spacing: 0.08em; color: var(--sig-red); margin-bottom: 2px; }
+        .cs-incident-text b { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; letter-spacing: 0.08em; color: var(--sig-red); margin-bottom: 2px; }
         .cs-breakdown { display: flex; flex-direction: column; gap: 8px; margin: 18px 0; padding-top: 18px; border-top: 1px solid var(--panel-border); }
-        .cs-breakdown-row { display: flex; justify-content: space-between; font-size: 14px; color: var(--text-muted); font-family: 'IBM Plex Mono', monospace; }
+        .cs-breakdown-row { display: flex; justify-content: space-between; font-size: 14px; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
         .cs-breakdown-row b { color: var(--text-primary); font-weight: 500; }
         .cs-footer-note { font-size: 12.5px; color: var(--text-muted); text-align: center; margin-top: 18px; line-height: 1.5; }
         .cs-streak-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
-        .cs-streak-num { font-family: 'IBM Plex Mono', monospace; font-size: 31.5px; font-weight: 600; color: var(--sig-amber); line-height: 1; }
-        .cs-streak-label { font-size: 11px; color: var(--text-muted); letter-spacing: 0.1em; font-family: 'IBM Plex Mono', monospace; margin-top: 4px; }
+        .cs-streak-num { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 31.5px; font-weight: 600; color: var(--sig-amber); line-height: 1; }
+        .cs-streak-label { font-size: 11px; color: var(--text-muted); letter-spacing: 0.1em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-top: 4px; }
         .cs-day-chips { display: flex; gap: 6px; }
         .cs-day-chip { width: 24px; height: 24px; border-radius: 3px; border: 1px solid var(--panel-border); }
         .cs-chart-wrap { height: 170px; margin: 4px -6px 22px -6px; }
         .cs-condition-dist { display: flex; gap: 8px; margin-bottom: 16px; }
-        .cs-dist-chip { flex: 1; text-align: center; padding: 10px 4px; border-radius: 3px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.04em; border: 1px solid currentColor; }
+        .cs-dist-chip { flex: 1; text-align: center; padding: 10px 4px; border-radius: 3px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; letter-spacing: 0.04em; border: 1px solid currentColor; }
         .cs-stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
         .cs-stat-card { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 6px; text-align: center; }
-        .cs-stat-value { font-family: 'IBM Plex Mono', monospace; font-size: 20px; font-weight: 600; }
-        .cs-stat-label { font-size: 10.5px; color: var(--text-muted); letter-spacing: 0.06em; margin-top: 4px; font-family: 'IBM Plex Mono', monospace; }
+        .cs-stat-value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; font-weight: 600; }
+        .cs-stat-label { font-size: 10.5px; color: var(--text-muted); letter-spacing: 0.06em; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
         .cs-lock-badge {
           position: absolute;
           top: 18px;
@@ -1031,7 +1124,7 @@ export default function CleraShieldCheckIn() {
           display: flex;
           align-items: center;
           gap: 7px;
-          font-family: 'IBM Plex Mono', monospace;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
           font-size: 13.5px;
           padding: 6px 11px;
           border-radius: 20px;
@@ -1051,18 +1144,18 @@ export default function CleraShieldCheckIn() {
           display: flex;
           align-items: center;
           justify-content: center;
-          font-family: 'IBM Plex Mono', monospace;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
           font-size: 14px;
           letter-spacing: 0.1em;
           color: var(--text-primary);
           transition-property: transform;
           transition-timing-function: ease-in-out;
         }
-        .cs-breathe-cycles { margin-top: 18px; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--text-muted); letter-spacing: 0.06em; }
+        .cs-breathe-cycles { margin-top: 18px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; color: var(--text-muted); letter-spacing: 0.06em; }
 
         .cs-intervention-group { margin-top: 26px; }
         .cs-intervention-group-label {
-          font-family: 'IBM Plex Mono', monospace;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
           font-size: 11px;
           letter-spacing: 0.14em;
           color: var(--text-muted);
@@ -1083,13 +1176,13 @@ export default function CleraShieldCheckIn() {
         }
         .cs-intervention-card:hover { border-color: var(--sig-amber); }
         .cs-intervention-card-top { display: flex; justify-content: space-between; align-items: baseline; }
-        .cs-intervention-title { font-family: 'Inter', sans-serif; font-weight: 600; font-size: 15.5px; color: var(--text-primary); }
-        .cs-intervention-duration { font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--text-muted); }
+        .cs-intervention-title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-weight: 600; font-size: 15.5px; color: var(--text-primary); }
+        .cs-intervention-duration { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--text-muted); }
         .cs-intervention-blurb { font-size: 13.5px; color: var(--text-muted); line-height: 1.4; }
-        .cs-intervention-modality { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--sig-amber); letter-spacing: 0.04em; margin-top: 2px; }
+        .cs-intervention-modality { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--sig-amber); letter-spacing: 0.04em; margin-top: 2px; }
 
         .cs-intervention-step-text {
-          font-family: 'Inter', sans-serif;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
           font-size: 17px;
           line-height: 1.6;
           color: var(--text-primary);
@@ -1104,7 +1197,7 @@ export default function CleraShieldCheckIn() {
           margin-bottom: 20px;
         }
         .cs-suggestion-label {
-          font-family: 'IBM Plex Mono', monospace;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
           font-size: 11px;
           letter-spacing: 0.1em;
           color: var(--sig-amber);
@@ -1121,15 +1214,16 @@ export default function CleraShieldCheckIn() {
           padding: 10px 0;
           cursor: pointer;
           color: var(--text-primary);
-          font-family: 'Inter', sans-serif;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
           font-size: 14.5px;
           font-weight: 600;
         }
         .cs-suggestion-item:first-of-type { border-top: none; }
-        .cs-suggestion-duration { font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--text-muted); font-weight: 400; }
+        .cs-suggestion-duration { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--text-muted); font-weight: 400; }
         .cs-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
-        .cs-field label { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.08em; color: var(--text-muted); }
-        .cs-field input, .cs-field select { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 14px; color: var(--text-primary); font-family: 'Inter', sans-serif; font-size: 15.5px; }
+        .cs-field label { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; letter-spacing: 0.08em; color: var(--text-muted); }
+        .cs-field-hint { font-size: 11.5px; color: var(--text-muted); margin-top: 4px; }
+        .cs-field input, .cs-field select { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 14px; color: var(--text-primary); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15.5px; }
         .cs-field input:focus, .cs-field select:focus { outline: none; border-color: var(--sig-amber); }
         .cs-full-width { width: 100%; }
 
@@ -1163,7 +1257,7 @@ export default function CleraShieldCheckIn() {
           background: transparent;
           border: none;
           color: var(--text-primary);
-          font-family: 'IBM Plex Mono', monospace;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
           font-size: 13px;
           letter-spacing: 0.04em;
           padding: 12px 10px;
@@ -1180,7 +1274,7 @@ export default function CleraShieldCheckIn() {
         .cs-home-section:last-child { border-bottom: none; }
         .cs-home-hero { padding-top: 8px; }
         .cs-home-h1 {
-          font-family: 'Oswald', sans-serif;
+          font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
           font-weight: 500;
           font-size: 32px;
           line-height: 1.2;
@@ -1188,7 +1282,7 @@ export default function CleraShieldCheckIn() {
           color: var(--text-primary);
         }
         .cs-home-h2 {
-          font-family: 'Oswald', sans-serif;
+          font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
           font-weight: 500;
           font-size: 22px;
           line-height: 1.3;
@@ -1211,7 +1305,7 @@ export default function CleraShieldCheckIn() {
           border: none;
           border-radius: 3px;
           padding: 16px;
-          font-family: 'Oswald', sans-serif;
+          font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
           font-weight: 600;
           font-size: 15.5px;
           letter-spacing: 0.08em;
@@ -1224,7 +1318,7 @@ export default function CleraShieldCheckIn() {
           border: 1px solid var(--panel-border);
           border-radius: 3px;
           padding: 16px;
-          font-family: 'Oswald', sans-serif;
+          font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
           font-weight: 600;
           font-size: 15.5px;
           letter-spacing: 0.08em;
@@ -1245,16 +1339,11 @@ export default function CleraShieldCheckIn() {
           .cs-home-h2 { font-size: 27px; }
           .cs-home-section { padding: 48px 0; }
         }
-        .cs-auth-error { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--sig-red); margin-bottom: 14px; line-height: 1.5; }
-        .cs-auth-notice { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--sig-green); margin-bottom: 14px; line-height: 1.5; }
+        .cs-auth-error { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; color: var(--sig-red); margin-bottom: 14px; line-height: 1.5; }
+        .cs-auth-notice { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; color: var(--sig-green); margin-bottom: 14px; line-height: 1.5; }
         .cs-auth-toggle { text-align: center; margin-top: 14px; font-size: 14px; color: var(--text-muted); }
         .cs-auth-toggle button { background: none; border: none; color: var(--sig-amber); cursor: pointer; font-size: 14px; text-decoration: underline; padding: 0; }
       `}</style>
-
-      <link
-        rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
-      />
 
       <div className={`cs-shell ${!session && page === "home" ? "cs-shell-home" : ""}`}>
         <div className="cs-topbar">
@@ -1351,11 +1440,14 @@ export default function CleraShieldCheckIn() {
                   <input
                     type="password"
                     required
-                    minLength={6}
+                    minLength={12}
                     value={authPassword}
                     onChange={(e) => setAuthPassword(e.target.value)}
                     autoComplete={authMode === "signin" ? "current-password" : "new-password"}
                   />
+                  {authMode === "signup" && (
+                    <div className="cs-field-hint">At least 12 characters.</div>
+                  )}
                 </div>
                 {authMode === "signup" && (
                   <div className="cs-field">
@@ -1629,14 +1721,14 @@ export default function CleraShieldCheckIn() {
                             <CartesianGrid stroke="#232B35" vertical={false} />
                             <XAxis
                               dataKey="label"
-                              tick={{ fill: "#7E8896", fontSize: 10, fontFamily: "IBM Plex Mono" }}
+                              tick={{ fill: "#7E8896", fontSize: 10, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" }}
                               axisLine={{ stroke: "#232B35" }}
                               tickLine={false}
                               interval={1}
                             />
                             <YAxis
                               domain={[0, 100]}
-                              tick={{ fill: "#7E8896", fontSize: 10, fontFamily: "IBM Plex Mono" }}
+                              tick={{ fill: "#7E8896", fontSize: 10, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" }}
                               axisLine={false}
                               tickLine={false}
                               width={26}
