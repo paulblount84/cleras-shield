@@ -71,6 +71,40 @@ function signInRequest(email, password) {
   return authRequest("token?grant_type=password", { email, password });
 }
 
+async function requestPasswordReset(email) {
+  // Supabase always responds 200 here regardless of whether the email exists,
+  // to avoid confirming/denying account existence to the caller.
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (e) {
+      /* ignore parse failure, fall through to generic message */
+    }
+    throw new Error(data.error_description || data.msg || "Could not send reset email.");
+  }
+}
+
+async function updatePasswordWithRecoveryToken(accessToken, newPassword) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    method: "PUT",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ password: newPassword }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error_description || data.msg || "Could not update password.");
+  return data; // updated user object
+}
+
 function refreshSessionRequest(refreshToken) {
   return authRequest("token?grant_type=refresh_token", { refresh_token: refreshToken });
 }
@@ -707,7 +741,7 @@ function Homepage({ onGetStarted, onSignIn }) {
 
 export default function CleraShieldCheckIn() {
   const [session, setSession] = useState(null); // { accessToken, refreshToken, expiresAt, userId, email } — memory only
-  const [authMode, setAuthMode] = useState("signin");
+  const [authMode, setAuthMode] = useState("signin"); // 'signin' | 'signup' | 'reset-request' | 'reset-confirm'
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authRole, setAuthRole] = useState("");
@@ -717,6 +751,14 @@ export default function CleraShieldCheckIn() {
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+
+  // Password recovery: tokens arrive in the URL hash after the person clicks
+  // the emailed reset link and gets redirected back here.
+  const [recoveryAccessToken, setRecoveryAccessToken] = useState(null);
+  const [recoveryRefreshToken, setRecoveryRefreshToken] = useState(null);
+  const [recoveryExpiresIn, setRecoveryExpiresIn] = useState(3600);
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
 
   // MFA step-up state. `pendingSession` holds an aal1 session obtained from
   // primary sign-in/sign-up while a second factor is being resolved — it is
@@ -770,6 +812,26 @@ export default function CleraShieldCheckIn() {
   useEffect(() => {
     const t = setInterval(() => setLockNow(Date.now()), 1000);
     return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash && hash.includes("type=recovery")) {
+      const params = new URLSearchParams(hash.replace(/^#/, ""));
+      const at = params.get("access_token");
+      const rt = params.get("refresh_token");
+      const ei = params.get("expires_in");
+      if (at) {
+        setRecoveryAccessToken(at);
+        setRecoveryRefreshToken(rt);
+        if (ei) setRecoveryExpiresIn(parseInt(ei, 10) || 3600);
+        setAuthMode("reset-confirm");
+        setPage("auth");
+      }
+      // Scrub the token out of the visible URL/history — it's single-purpose
+      // and shouldn't linger in the address bar or browser history.
+      window.history.replaceState(null, "", window.location.pathname);
+    }
   }, []);
 
   function buildSession(data) {
@@ -967,6 +1029,59 @@ export default function CleraShieldCheckIn() {
     }
   }
 
+  async function handleRequestReset(e) {
+    e.preventDefault();
+    setAuthError("");
+    setAuthNotice("");
+    setAuthLoading(true);
+    try {
+      await requestPasswordReset(authEmail);
+    } catch (e2) {
+      /* Intentionally show the same message on failure — not confirming or
+         denying whether the email has an account (matches Supabase's own
+         anti-enumeration behavior on this endpoint). */
+    } finally {
+      setAuthNotice("If that email has an account, a reset link is on its way. Check your inbox.");
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleConfirmReset(e) {
+    e.preventDefault();
+    setAuthError("");
+    setAuthLoading(true);
+    if (newPassword.length < 12) {
+      setAuthError("Password must be at least 12 characters.");
+      setAuthLoading(false);
+      return;
+    }
+    if (newPassword !== newPasswordConfirm) {
+      setAuthError("Passwords don't match.");
+      setAuthLoading(false);
+      return;
+    }
+    try {
+      const updatedUser = await updatePasswordWithRecoveryToken(recoveryAccessToken, newPassword);
+      const sessionData = {
+        access_token: recoveryAccessToken,
+        refresh_token: recoveryRefreshToken,
+        expires_in: recoveryExpiresIn,
+        user: updatedUser,
+      };
+      setNewPassword("");
+      setNewPasswordConfirm("");
+      setRecoveryAccessToken(null);
+      setRecoveryRefreshToken(null);
+      await handlePostPrimaryAuth(sessionData);
+    } catch (err) {
+      setAuthError(
+        "That reset link has expired or was already used. Request a new one."
+      );
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
   function cancelMfa() {
     if (pendingSession) {
       logoutRequest(pendingSession.accessToken);
@@ -1051,10 +1166,15 @@ export default function CleraShieldCheckIn() {
     setView("checkin");
     setPage("home");
     resetToIntro();
+    setAuthMode("signin");
     setAuthEmail("");
     setAuthPassword("");
     setAuthNotice("");
     setAuthError("");
+    setNewPassword("");
+    setNewPasswordConfirm("");
+    setRecoveryAccessToken(null);
+    setRecoveryRefreshToken(null);
     setCompletionCounts({});
     closeIntervention();
     setMfaStage(null);
@@ -1504,7 +1624,7 @@ export default function CleraShieldCheckIn() {
           justify-content: center;
           margin: 8px 0 16px 0;
         }
-        .cs-mfa-qr svg { width: 100%; max-width: 200px; height: auto; }
+        .cs-mfa-qr img { width: 100%; max-width: 200px; height: auto; display: block; }
         .cs-mfa-secret {
           font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
           font-size: 12.5px;
@@ -1704,7 +1824,7 @@ export default function CleraShieldCheckIn() {
 
         {!session && page === "auth" && (
           <div className="cs-body">
-            {!mfaStage && (
+            {!mfaStage && (authMode === "signin" || authMode === "signup") && (
               <div className="cs-card">
                 <h1 className="cs-h1">
                   {authMode === "signin" ? "Welcome back." : "Set up your account."}
@@ -1762,6 +1882,20 @@ export default function CleraShieldCheckIn() {
                   </button>
                 </form>
 
+                {authMode === "signin" && (
+                  <div className="cs-auth-toggle">
+                    <button
+                      onClick={() => {
+                        setAuthMode("reset-request");
+                        setAuthError("");
+                        setAuthNotice("");
+                      }}
+                    >
+                      Forgot password?
+                    </button>
+                  </div>
+                )}
+
                 <div className="cs-auth-toggle">
                   {authMode === "signin" ? (
                     <>
@@ -1779,6 +1913,85 @@ export default function CleraShieldCheckIn() {
                     </>
                   )}
                 </div>
+              </div>
+            )}
+
+            {!mfaStage && authMode === "reset-request" && (
+              <div className="cs-card">
+                <h1 className="cs-h1">Reset your password.</h1>
+                <p className="cs-sub">
+                  Enter the email on your account and we'll send you a link to set a new
+                  password.
+                </p>
+
+                {authError && <div className="cs-auth-error">{authError}</div>}
+                {authNotice && <div className="cs-auth-notice">{authNotice}</div>}
+
+                <form onSubmit={handleRequestReset}>
+                  <div className="cs-field">
+                    <label>EMAIL</label>
+                    <input
+                      type="email"
+                      required
+                      value={authEmail}
+                      onChange={(e) => setAuthEmail(e.target.value)}
+                      autoComplete="email"
+                    />
+                  </div>
+                  <button className="cs-begin-btn cs-full-width" type="submit" disabled={authLoading}>
+                    {authLoading ? "SENDING…" : "SEND RESET LINK"}
+                  </button>
+                </form>
+
+                <div className="cs-auth-toggle">
+                  <button
+                    onClick={() => {
+                      setAuthMode("signin");
+                      setAuthError("");
+                      setAuthNotice("");
+                    }}
+                  >
+                    Back to sign in
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!mfaStage && authMode === "reset-confirm" && (
+              <div className="cs-card">
+                <h1 className="cs-h1">Set a new password.</h1>
+                <p className="cs-sub">Choose a new password for your account.</p>
+
+                {authError && <div className="cs-auth-error">{authError}</div>}
+
+                <form onSubmit={handleConfirmReset}>
+                  <div className="cs-field">
+                    <label>NEW PASSWORD</label>
+                    <input
+                      type="password"
+                      required
+                      minLength={12}
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      autoComplete="new-password"
+                    />
+                    <div className="cs-field-hint">At least 12 characters.</div>
+                  </div>
+                  <div className="cs-field">
+                    <label>CONFIRM NEW PASSWORD</label>
+                    <input
+                      type="password"
+                      required
+                      minLength={12}
+                      value={newPasswordConfirm}
+                      onChange={(e) => setNewPasswordConfirm(e.target.value)}
+                      autoComplete="new-password"
+                    />
+                  </div>
+                  <button className="cs-begin-btn cs-full-width" type="submit" disabled={authLoading}>
+                    {authLoading ? "WORKING…" : "SET NEW PASSWORD"}
+                  </button>
+                </form>
               </div>
             )}
 
@@ -1810,7 +2023,9 @@ export default function CleraShieldCheckIn() {
                   6-digit code it shows below.
                 </p>
                 {mfaQrSvg && (
-                  <div className="cs-mfa-qr" dangerouslySetInnerHTML={{ __html: mfaQrSvg }} />
+                  <div className="cs-mfa-qr">
+                    <img src={mfaQrSvg} alt="Two-factor authentication QR code" />
+                  </div>
                 )}
                 {mfaSecret && (
                   <div className="cs-mfa-secret">
