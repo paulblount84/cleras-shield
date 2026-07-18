@@ -34,8 +34,8 @@ async function authRequest(path, body) {
   return data;
 }
 
-function signUpRequest(email, password) {
-  return authRequest("signup", { email, password });
+function signUpRequest(email, password, role) {
+  return authRequest("signup", { email, password, data: { role } });
 }
 
 function signInRequest(email, password) {
@@ -257,6 +257,16 @@ function TrendTooltip({ active, payload, label }) {
   );
 }
 
+const ROLE_OPTIONS = [
+  "Police Officer",
+  "Sheriff Deputy",
+  "Public Safety Dispatcher",
+  "Custody Officer",
+  "Public Service Officer",
+  "Community Service Officer",
+  "Police Cadet",
+];
+
 /* ---------- Main ---------- */
 
 export default function CleraShieldCheckIn() {
@@ -264,6 +274,7 @@ export default function CleraShieldCheckIn() {
   const [authMode, setAuthMode] = useState("signin");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [authRole, setAuthRole] = useState(ROLE_OPTIONS[0]);
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
@@ -281,7 +292,7 @@ export default function CleraShieldCheckIn() {
   const [lockNow, setLockNow] = useState(Date.now());
 
   useEffect(() => {
-    const t = setInterval(() => setClock(new Date()), 1000 * 30);
+    const t = setInterval(() => setClock(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
 
@@ -326,7 +337,7 @@ export default function CleraShieldCheckIn() {
     setAuthLoading(true);
     try {
       if (authMode === "signup") {
-        const data = await signUpRequest(authEmail, authPassword);
+        const data = await signUpRequest(authEmail, authPassword, authRole);
         if (data.access_token && data.user) {
           setSession({ accessToken: data.access_token, userId: data.user.id, email: data.user.email });
         } else {
@@ -424,8 +435,8 @@ export default function CleraShieldCheckIn() {
     }
   }
 
-  const dateStr = clock.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-  const timeStr = clock.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const dateStr = clock.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+  const timeStr = clock.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
   const currentQ = isQuestion ? ALL_STEPS[step] : null;
 
@@ -628,8 +639,9 @@ export default function CleraShieldCheckIn() {
         .cs-lock-dot { width: 8px; height: 8px; border-radius: 50%; transition: background 1s linear; }
         .cs-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
         .cs-field label { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.08em; color: var(--text-muted); }
-        .cs-field input { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 14px; color: var(--text-primary); font-family: 'Inter', sans-serif; font-size: 15.5px; }
-        .cs-field input:focus { outline: none; border-color: var(--sig-amber); }
+        .cs-field input, .cs-field select { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 14px; color: var(--text-primary); font-family: 'Inter', sans-serif; font-size: 15.5px; }
+        .cs-field input:focus, .cs-field select:focus { outline: none; border-color: var(--sig-amber); }
+        .cs-full-width { width: 100%; }
         .cs-auth-error { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--sig-red); margin-bottom: 14px; line-height: 1.5; }
         .cs-auth-notice { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--sig-green); margin-bottom: 14px; line-height: 1.5; }
         .cs-auth-toggle { text-align: center; margin-top: 14px; font-size: 14px; color: var(--text-muted); }
@@ -669,15 +681,12 @@ export default function CleraShieldCheckIn() {
         {!session && (
           <div className="cs-body">
             <div className="cs-card">
-              <div className="cs-eyebrow">
-                {authMode === "signin" ? "OFFICER SIGN-IN" : "CREATE ACCOUNT"}
-              </div>
               <h1 className="cs-h1">
                 {authMode === "signin" ? "Welcome back." : "Set up your account."}
               </h1>
               <p className="cs-sub">
-                Your check-ins are stored in Supabase under row-level security — only you
-                can ever read or write your own data.
+                Your responses are protected with industry standard security, ensuring that
+                only you have access to your personal check-in history.
               </p>
 
               {authError && <div className="cs-auth-error">{authError}</div>}
@@ -705,7 +714,19 @@ export default function CleraShieldCheckIn() {
                     autoComplete={authMode === "signin" ? "current-password" : "new-password"}
                   />
                 </div>
-                <button className="cs-begin-btn" type="submit" disabled={authLoading}>
+                {authMode === "signup" && (
+                  <div className="cs-field">
+                    <label>ROLE</label>
+                    <select value={authRole} onChange={(e) => setAuthRole(e.target.value)}>
+                      {ROLE_OPTIONS.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <button className="cs-begin-btn cs-full-width" type="submit" disabled={authLoading}>
                   {authLoading ? "WORKING…" : authMode === "signin" ? "SIGN IN" : "CREATE ACCOUNT"}
                 </button>
               </form>
