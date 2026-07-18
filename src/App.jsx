@@ -9,17 +9,47 @@ import {
   CartesianGrid,
 } from "recharts";
 
-/* ---------- Supabase (REST, no SDK — nothing persisted to browser storage) ----------
-   Session lives only in React state for the life of this session. There is no
-   localStorage/sessionStorage/window.storage anywhere in this file — closing or
-   reloading the artifact requires signing in again. Every read/write of check-in
-   data goes straight to Supabase and is scoped by Postgres RLS to auth.uid(),
-   so this file never holds another officer's data and never caches anything
-   outside of the current browser tab's memory.
+/* ---------- Supabase (REST, no SDK) ----------
+   The session (access token, refresh token, expiry) persists in sessionStorage
+   so a page refresh doesn't sign people out — but it's scoped to the browser
+   tab: closing the tab or browser clears it, and it's never shared across
+   tabs the way localStorage would be. Every read/write of check-in data goes
+   straight to Supabase and is scoped by Postgres RLS to auth.uid(), so this
+   file never holds another officer's data regardless of what's cached locally.
 ------------------------------------------------------------------------------- */
 
 const SUPABASE_URL = "https://rayuaqfwcxzqwekbrpbs.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_uFpL72MpnDQGNJtXVYrP5A_oRUodxp7";
+
+// Session persists in sessionStorage (per-tab, cleared when the tab/browser
+// closes) rather than staying purely in-memory — a deliberate tradeoff so a
+// page refresh doesn't sign people out, at the cost of the token being
+// readable by any script running on the page for the life of that tab.
+const SESSION_STORAGE_KEY = "cs-session";
+
+function loadStoredSession() {
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.accessToken || !parsed.refreshToken) return null;
+    return parsed;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveStoredSession(sessionObj) {
+  try {
+    if (sessionObj) {
+      window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionObj));
+    } else {
+      window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    }
+  } catch (e) {
+    /* storage unavailable (private browsing, quota, etc.) — fail silently, session just won't persist */
+  }
+}
 
 // Columns the browser is actually allowed to SELECT (matches the column-level
 // GRANTs in the database — this list isn't just cosmetic, the server enforces it).
@@ -741,7 +771,7 @@ function Homepage({ onGetStarted, onSignIn }) {
 /* ---------- Main ---------- */
 
 export default function CleraShieldCheckIn() {
-  const [session, setSession] = useState(null); // { accessToken, refreshToken, expiresAt, userId, email } — memory only
+  const [session, setSession] = useState(loadStoredSession); // { accessToken, refreshToken, expiresAt, userId, email }
   const [authMode, setAuthMode] = useState("signin"); // 'signin' | 'signup' | 'reset-request' | 'reset-confirm'
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -804,6 +834,7 @@ export default function CleraShieldCheckIn() {
 
   useEffect(() => {
     sessionRef.current = session;
+    saveStoredSession(session);
   }, [session]);
 
   useEffect(() => {
