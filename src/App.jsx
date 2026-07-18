@@ -67,6 +67,29 @@ async function upsertCheckIn(accessToken, entry) {
   return data;
 }
 
+async function fetchInterventionCompletions(accessToken, userId) {
+  const url = `${SUPABASE_URL}/rest/v1/intervention_completions?select=intervention_id,completed_at&user_id=eq.${userId}`;
+  const res = await fetch(url, {
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error("Failed to load intervention history");
+  return res.json();
+}
+
+async function logInterventionCompletion(accessToken, userId, interventionId) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/intervention_completions`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      Prefer: "return=minimal",
+    },
+    body: JSON.stringify([{ user_id: userId, intervention_id: interventionId }]),
+  });
+  if (!res.ok) throw new Error("Failed to log completion");
+}
+
 /* ---------- Scoring model ---------- */
 
 const WEIGHTS = { sleep: 0.4, stress: 0.3, recovery: 0.3 };
@@ -119,6 +142,151 @@ const INCIDENT_QUESTION = {
 };
 
 const ALL_STEPS = [QUESTIONS[0], QUESTIONS[1], INCIDENT_QUESTION, QUESTIONS[2]];
+
+/* ---------- Interventions library ---------- */
+
+const INTERVENTIONS = [
+  {
+    id: "paced-breathing",
+    category: "In The Moment",
+    modality: "CBT / DBT",
+    title: "Paced Breathing",
+    duration: "~1 min",
+    blurb: "Slow your exhale to bring your heart rate down.",
+    type: "breathing",
+    steps: [
+      "A slower exhale than inhale signals safety to your nervous system. Follow the circle: breathe in as it expands, out as it contracts.",
+    ],
+  },
+  {
+    id: "tipp",
+    category: "In The Moment",
+    modality: "DBT",
+    title: "TIPP",
+    duration: "~3 min",
+    blurb: "For genuinely acute distress, right after a hard call.",
+    type: "steps",
+    steps: [
+      "T — Temperature. Splash cold water on your face, or hold something cold. This triggers a reflex that drops your heart rate fast.",
+      "I — Intense Exercise. If you can, do 30-60 seconds of something physical — push-ups, running in place. Burn off the surge.",
+      "P — Paced Breathing. Slow your exhale so it's longer than your inhale. A few rounds is enough.",
+      "P — Paired Muscle Relaxation. Tense one muscle group hard for 5 seconds, then release. Work through your body, one group at a time.",
+    ],
+  },
+  {
+    id: "grounding-54321",
+    category: "In The Moment",
+    modality: "DBT / ACT",
+    title: "5-4-3-2-1 Grounding",
+    duration: "~2 min",
+    blurb: "Interrupt a spiral and land back in the present.",
+    type: "steps",
+    steps: [
+      "Name 5 things you can see around you right now.",
+      "Name 4 things you can physically feel — the ground, your clothes, the air.",
+      "Name 3 things you can hear.",
+      "Name 2 things you can smell.",
+      "Name 1 thing you can taste, or one thing you appreciate about yourself right now.",
+    ],
+  },
+  {
+    id: "stop-skill",
+    category: "In The Moment",
+    modality: "DBT",
+    title: "STOP Skill",
+    duration: "~1 min",
+    blurb: "For when you're about to react and shouldn't.",
+    type: "steps",
+    steps: [
+      "S — Stop. Don't react. Just pause exactly where you are.",
+      "T — Take a step back. Take a breath. Create space, physically or mentally, before you respond.",
+      "O — Observe. What's happening, inside and around you, right now? Just notice — don't judge it.",
+      "P — Proceed mindfully. Ask: what response actually fits this moment, and who I want to be?",
+    ],
+  },
+  {
+    id: "quick-thought-check",
+    category: "Reframe A Thought",
+    modality: "CBT",
+    title: "Quick Thought Check",
+    duration: "~2 min",
+    blurb: "A condensed thought record for a shift, not a therapy session.",
+    type: "steps",
+    steps: [
+      "What's the thought that's stuck with you right now?",
+      "What's the evidence this thought is completely true? What's the evidence against it?",
+      "If a partner or colleague had this exact thought after this exact shift, what would you tell them?",
+      "What's a more balanced way to see it?",
+    ],
+  },
+  {
+    id: "spot-the-distortion",
+    category: "Reframe A Thought",
+    modality: "CBT",
+    title: "Spot The Distortion",
+    duration: "~1 min",
+    blurb: "A quick reference for recognizing unhelpful thinking patterns.",
+    type: "steps",
+    steps: [
+      "All-or-Nothing: \"I completely botched that call.\" More accurate: \"That part didn't go how I wanted.\"",
+      "Catastrophizing: \"This is going to end my career.\" More accurate: \"This was a bad moment, not a verdict.\"",
+      "Mind Reading: \"My sergeant thinks I'm weak for asking for help.\" More accurate: \"I don't actually know what they think.\"",
+      "Should Statements: \"I should never feel rattled by this job.\" More accurate: \"It makes sense that this affected me.\"",
+      "Discounting the Positive: \"Anyone would've made that same good call.\" More accurate: \"That was a good call, and I made it.\"",
+    ],
+  },
+  {
+    id: "name-it",
+    category: "Values & Acceptance",
+    modality: "ACT",
+    title: "Name It",
+    duration: "~1 min",
+    blurb: "Create distance from a thought that's stuck.",
+    type: "steps",
+    steps: [
+      "Notice the thought that's bothering you.",
+      "Now say it to yourself starting with \"I'm having the thought that...\" — for example, \"I'm having the thought that I failed.\"",
+      "Notice: the thought is something your mind is doing, not a fact about you. You can hold it loosely instead of fusing with it.",
+    ],
+  },
+  {
+    id: "radical-acceptance",
+    category: "Values & Acceptance",
+    modality: "DBT",
+    title: "Radical Acceptance",
+    duration: "~2 min",
+    blurb: "For something that already happened and can't be changed.",
+    type: "steps",
+    steps: [
+      "Something happened that you wish hadn't. Acceptance doesn't mean you're okay with it — it means you stop fighting the fact that it happened.",
+      "Say to yourself: \"This happened. Fighting that fact only adds more pain on top of what's already there.\"",
+      "Ask: what's one thing within my control right now, given that this is reality?",
+    ],
+  },
+  {
+    id: "values-checkin",
+    category: "Values & Acceptance",
+    modality: "ACT",
+    title: "Values Check-In",
+    duration: "~2 min",
+    blurb: "For a low-motivation day — reconnect with what matters.",
+    type: "steps",
+    steps: [
+      "Zoom out for a second. What matters to you in how you show up at this job — not what you're supposed to say, what actually matters to you?",
+      "Given today, what's one small action in the next hour that fits that?",
+      "That's it. Small and doable beats big and abandoned.",
+    ],
+  },
+];
+
+const INTERVENTION_CATEGORIES = ["In The Moment", "Reframe A Thought", "Values & Acceptance"];
+
+function suggestedInterventionIds(pct, incidentFlag) {
+  if (incidentFlag) return ["tipp", "radical-acceptance"];
+  if (pct < 45) return ["paced-breathing", "quick-thought-check"];
+  if (pct < 75) return ["stop-skill", "values-checkin"];
+  return [];
+}
 
 function getCondition(pct) {
   if (pct >= 75)
@@ -222,6 +390,46 @@ function Gauge({ pct, color }) {
         style={{ transition: "stroke-dashoffset 900ms cubic-bezier(.2,.8,.2,1), stroke 400ms" }}
       />
     </svg>
+  );
+}
+
+/* ---------- Breathing pacer ---------- */
+
+function BreathingPacer({ onCycleComplete }) {
+  const [phase, setPhase] = useState("inhale"); // 'inhale' | 'hold' | 'exhale'
+  const [cycles, setCycles] = useState(0);
+  const PHASE_MS = { inhale: 4000, hold: 1000, exhale: 6000 };
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (phase === "inhale") setPhase("hold");
+      else if (phase === "hold") setPhase("exhale");
+      else {
+        setPhase("inhale");
+        setCycles((c) => {
+          const next = c + 1;
+          if (onCycleComplete) onCycleComplete(next);
+          return next;
+        });
+      }
+    }, PHASE_MS[phase]);
+    return () => clearTimeout(t);
+  }, [phase]);
+
+  const scale = phase === "inhale" ? 1 : phase === "hold" ? 1 : 0.55;
+  const label = phase === "inhale" ? "IN" : phase === "hold" ? "HOLD" : "OUT";
+  const duration = phase === "inhale" ? 4000 : phase === "hold" ? 200 : 6000;
+
+  return (
+    <div className="cs-breathe-wrap">
+      <div
+        className="cs-breathe-circle"
+        style={{ transform: `scale(${scale})`, transitionDuration: `${duration}ms` }}
+      >
+        <span>{label}</span>
+      </div>
+      <div className="cs-breathe-cycles">{cycles} cycles</div>
+    </div>
   );
 }
 
@@ -393,6 +601,11 @@ export default function CleraShieldCheckIn() {
   const [saveError, setSaveError] = useState("");
   const [lockNow, setLockNow] = useState(Date.now());
 
+  const [activeInterventionId, setActiveInterventionId] = useState(null);
+  const [interventionStepIndex, setInterventionStepIndex] = useState(0);
+  const [breathingCycles, setBreathingCycles] = useState(0);
+  const [completionCounts, setCompletionCounts] = useState({});
+
   useEffect(() => {
     const t = setInterval(() => setClock(new Date()), 1000);
     return () => clearInterval(t);
@@ -432,6 +645,22 @@ export default function CleraShieldCheckIn() {
     })();
   }, [session]);
 
+  useEffect(() => {
+    if (!session) return;
+    (async () => {
+      try {
+        const rows = await fetchInterventionCompletions(session.accessToken, session.userId);
+        const counts = {};
+        rows.forEach((r) => {
+          counts[r.intervention_id] = (counts[r.intervention_id] || 0) + 1;
+        });
+        setCompletionCounts(counts);
+      } catch (e) {
+        /* non-critical, fail silently */
+      }
+    })();
+  }, [session]);
+
   async function handleAuthSubmit(e) {
     e.preventDefault();
     setAuthError("");
@@ -467,6 +696,8 @@ export default function CleraShieldCheckIn() {
     setAuthPassword("");
     setAuthNotice("");
     setAuthError("");
+    setCompletionCounts({});
+    closeIntervention();
   }
 
   const NAV_ITEMS = [
@@ -562,6 +793,39 @@ export default function CleraShieldCheckIn() {
       setView("trends");
     } catch (e) {
       setSaveError("Could not save to Supabase. Your check-in was not logged — try again.");
+    }
+  }
+
+  function openIntervention(id) {
+    setActiveInterventionId(id);
+    setInterventionStepIndex(0);
+    setBreathingCycles(0);
+  }
+
+  function closeIntervention() {
+    setActiveInterventionId(null);
+    setInterventionStepIndex(0);
+    setBreathingCycles(0);
+  }
+
+  function advanceIntervention(totalSteps) {
+    if (interventionStepIndex + 1 >= totalSteps) {
+      completeIntervention();
+      closeIntervention();
+    } else {
+      setInterventionStepIndex((i) => i + 1);
+    }
+  }
+
+  async function completeIntervention() {
+    const id = activeInterventionId;
+    setCompletionCounts((prev) => ({ ...prev, [id]: (prev[id] || 0) + 1 }));
+    if (session) {
+      try {
+        await logInterventionCompletion(session.accessToken, session.userId, id);
+      } catch (e) {
+        /* non-critical, completion still shown locally */
+      }
     }
   }
 
@@ -776,6 +1040,93 @@ export default function CleraShieldCheckIn() {
           transition: color 1s linear, border-color 1s linear;
         }
         .cs-lock-dot { width: 8px; height: 8px; border-radius: 50%; transition: background 1s linear; }
+
+        .cs-breathe-wrap { display: flex; flex-direction: column; align-items: center; margin: 28px 0; }
+        .cs-breathe-circle {
+          width: 140px;
+          height: 140px;
+          border-radius: 50%;
+          background: radial-gradient(circle, rgba(232,131,63,0.35), rgba(232,131,63,0.08));
+          border: 2px solid var(--sig-amber);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 14px;
+          letter-spacing: 0.1em;
+          color: var(--text-primary);
+          transition-property: transform;
+          transition-timing-function: ease-in-out;
+        }
+        .cs-breathe-cycles { margin-top: 18px; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--text-muted); letter-spacing: 0.06em; }
+
+        .cs-intervention-group { margin-top: 26px; }
+        .cs-intervention-group-label {
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 11px;
+          letter-spacing: 0.14em;
+          color: var(--text-muted);
+          margin-bottom: 10px;
+        }
+        .cs-intervention-card {
+          width: 100%;
+          text-align: left;
+          background: #171C24;
+          border: 1px solid var(--panel-border);
+          border-radius: 3px;
+          padding: 14px 16px;
+          margin-bottom: 10px;
+          cursor: pointer;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+        .cs-intervention-card:hover { border-color: var(--sig-amber); }
+        .cs-intervention-card-top { display: flex; justify-content: space-between; align-items: baseline; }
+        .cs-intervention-title { font-family: 'Inter', sans-serif; font-weight: 600; font-size: 15.5px; color: var(--text-primary); }
+        .cs-intervention-duration { font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--text-muted); }
+        .cs-intervention-blurb { font-size: 13.5px; color: var(--text-muted); line-height: 1.4; }
+        .cs-intervention-modality { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--sig-amber); letter-spacing: 0.04em; margin-top: 2px; }
+
+        .cs-intervention-step-text {
+          font-family: 'Inter', sans-serif;
+          font-size: 17px;
+          line-height: 1.6;
+          color: var(--text-primary);
+          margin: 0 0 28px 0;
+        }
+
+        .cs-suggestion-box {
+          background: #171C24;
+          border: 1px solid var(--panel-border);
+          border-radius: 3px;
+          padding: 14px 16px;
+          margin-bottom: 20px;
+        }
+        .cs-suggestion-label {
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 11px;
+          letter-spacing: 0.1em;
+          color: var(--sig-amber);
+          margin-bottom: 10px;
+        }
+        .cs-suggestion-item {
+          width: 100%;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          background: transparent;
+          border: none;
+          border-top: 1px solid var(--panel-border);
+          padding: 10px 0;
+          cursor: pointer;
+          color: var(--text-primary);
+          font-family: 'Inter', sans-serif;
+          font-size: 14.5px;
+          font-weight: 600;
+        }
+        .cs-suggestion-item:first-of-type { border-top: none; }
+        .cs-suggestion-duration { font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--text-muted); font-weight: 400; }
         .cs-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
         .cs-field label { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.08em; color: var(--text-muted); }
         .cs-field input, .cs-field select { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 14px; color: var(--text-primary); font-family: 'Inter', sans-serif; font-size: 15.5px; }
@@ -1060,6 +1411,15 @@ export default function CleraShieldCheckIn() {
                 <button className={`cs-tab ${view === "trends" ? "active" : ""}`} onClick={() => setView("trends")}>
                   TRENDS
                 </button>
+                <button
+                  className={`cs-tab ${view === "interventions" ? "active" : ""}`}
+                  onClick={() => {
+                    setView("interventions");
+                    closeIntervention();
+                  }}
+                >
+                  INTERVENTIONS
+                </button>
               </div>
             )}
 
@@ -1196,6 +1556,29 @@ export default function CleraShieldCheckIn() {
                     </div>
                   </div>
 
+                  {suggestedInterventionIds(pct, incidentFlag).length > 0 && (
+                    <div className="cs-suggestion-box">
+                      <div className="cs-suggestion-label">WANT A QUICK RESET?</div>
+                      {suggestedInterventionIds(pct, incidentFlag).map((id) => {
+                        const iv = INTERVENTIONS.find((x) => x.id === id);
+                        if (!iv) return null;
+                        return (
+                          <button
+                            key={id}
+                            className="cs-suggestion-item"
+                            onClick={() => {
+                              setView("interventions");
+                              openIntervention(id);
+                            }}
+                          >
+                            <span>{iv.title}</span>
+                            <span className="cs-suggestion-duration">{iv.duration}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
                   <button className="cs-begin-btn" onClick={finishCheckIn}>
                     LOG &amp; DONE FOR TODAY
                   </button>
@@ -1314,6 +1697,90 @@ export default function CleraShieldCheckIn() {
                   )}
                 </div>
               )}
+
+              {view === "interventions" && !activeInterventionId && (
+                <div className="cs-card">
+                  <div className="cs-eyebrow">CARE PATHWAYS</div>
+                  <h1 className="cs-h1">Interventions</h1>
+                  <p className="cs-sub">
+                    Short, evidence-informed exercises drawn from CBT, DBT, and ACT. Nothing
+                    you do here is saved — only that you did it.
+                  </p>
+                  {INTERVENTION_CATEGORIES.map((cat) => (
+                    <div key={cat} className="cs-intervention-group">
+                      <div className="cs-intervention-group-label">{cat}</div>
+                      {INTERVENTIONS.filter((iv) => iv.category === cat).map((iv) => (
+                        <button
+                          key={iv.id}
+                          className="cs-intervention-card"
+                          onClick={() => openIntervention(iv.id)}
+                        >
+                          <div className="cs-intervention-card-top">
+                            <span className="cs-intervention-title">{iv.title}</span>
+                            <span className="cs-intervention-duration">{iv.duration}</span>
+                          </div>
+                          <div className="cs-intervention-blurb">{iv.blurb}</div>
+                          <div className="cs-intervention-modality">
+                            {iv.modality}
+                            {completionCounts[iv.id] ? ` · Done ${completionCounts[iv.id]}×` : ""}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {view === "interventions" && activeInterventionId && (() => {
+                const iv = INTERVENTIONS.find((x) => x.id === activeInterventionId);
+                if (!iv) return null;
+                const isLast = interventionStepIndex + 1 >= iv.steps.length;
+                return (
+                  <div className="cs-card">
+                    <div className="cs-eyebrow">
+                      {iv.title.toUpperCase()} · {iv.modality}
+                    </div>
+                    {iv.type === "breathing" ? (
+                      <>
+                        <p className="cs-sub">{iv.steps[0]}</p>
+                        <BreathingPacer onCycleComplete={(n) => setBreathingCycles(n)} />
+                        <button
+                          className="cs-begin-btn cs-full-width"
+                          onClick={() => {
+                            completeIntervention();
+                            closeIntervention();
+                          }}
+                        >
+                          DONE
+                        </button>
+                        <button className="cs-secondary-btn" onClick={closeIntervention}>
+                          Back to list
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <div className="cs-progress" style={{ marginBottom: 24 }}>
+                          {iv.steps.map((_, i) => (
+                            <div className="cs-seg" key={i}>
+                              <div className={`cs-seg-fill ${i < interventionStepIndex ? "filled" : ""}`} />
+                            </div>
+                          ))}
+                        </div>
+                        <p className="cs-intervention-step-text">{iv.steps[interventionStepIndex]}</p>
+                        <button
+                          className="cs-begin-btn cs-full-width"
+                          onClick={() => advanceIntervention(iv.steps.length)}
+                        >
+                          {isLast ? "DONE" : "NEXT"}
+                        </button>
+                        <button className="cs-secondary-btn" onClick={closeIntervention}>
+                          Back to list
+                        </button>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="cs-footer-note">
