@@ -149,6 +149,38 @@ function getCondition(pct) {
   };
 }
 
+/* ---------- Lock timer helpers ---------- */
+
+const LOCK_MS = 24 * 60 * 60 * 1000;
+
+function hexToRgb(hex) {
+  const v = hex.replace("#", "");
+  return { r: parseInt(v.substring(0, 2), 16), g: parseInt(v.substring(2, 4), 16), b: parseInt(v.substring(4, 6), 16) };
+}
+
+function lerpColor(hexA, hexB, t) {
+  const a = hexToRgb(hexA);
+  const b = hexToRgb(hexB);
+  const r = Math.round(a.r + (b.r - a.r) * t);
+  const g = Math.round(a.g + (b.g - a.g) * t);
+  const bl = Math.round(a.b + (b.b - a.b) * t);
+  return `rgb(${r}, ${g}, ${bl})`;
+}
+
+function lockProgressColor(t) {
+  const clamped = Math.max(0, Math.min(1, t));
+  if (clamped < 0.5) return lerpColor("#D6484A", "#E8833F", clamped / 0.5);
+  return lerpColor("#E8833F", "#3FB871", (clamped - 0.5) / 0.5);
+}
+
+function formatCountdown(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = String(Math.floor(total / 3600)).padStart(2, "0");
+  const m = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+  const s = String(total % 60).padStart(2, "0");
+  return `${h}:${m}:${s}`;
+}
+
 /* ---------- Date helpers ---------- */
 
 function dateKey(d) {
@@ -246,9 +278,15 @@ export default function CleraShieldCheckIn() {
   const [history, setHistory] = useState({});
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [lockNow, setLockNow] = useState(Date.now());
 
   useEffect(() => {
     const t = setInterval(() => setClock(new Date()), 1000 * 30);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setLockNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
 
@@ -269,6 +307,7 @@ export default function CleraShieldCheckIn() {
             stress: r.stress_score,
             recovery: r.recovery_score,
             incidentFlag: r.incident_flag,
+            createdAt: r.created_at,
           };
         });
         setHistory(h);
@@ -364,7 +403,8 @@ export default function CleraShieldCheckIn() {
     };
     setSaveError("");
     try {
-      await upsertCheckIn(session.accessToken, row);
+      const saved = await upsertCheckIn(session.accessToken, row);
+      const createdAt = saved && saved[0] && saved[0].created_at ? saved[0].created_at : new Date().toISOString();
       setHistory((prev) => ({
         ...prev,
         [key]: {
@@ -374,6 +414,7 @@ export default function CleraShieldCheckIn() {
           stress: row.stress_score,
           recovery: row.recovery_score,
           incidentFlag,
+          createdAt,
         },
       }));
       resetToIntro();
@@ -449,6 +490,21 @@ export default function CleraShieldCheckIn() {
 
   const incidentCount14 = present14.filter((d) => d.entry.incidentFlag).length;
 
+  const lastCheckIn = useMemo(() => {
+    const entries = Object.values(history).filter((e) => e.createdAt);
+    if (!entries.length) return null;
+    return entries.reduce((latest, e) =>
+      new Date(e.createdAt).getTime() > new Date(latest.createdAt).getTime() ? e : latest
+    );
+  }, [history]);
+
+  const unlockAt = lastCheckIn ? new Date(lastCheckIn.createdAt).getTime() + LOCK_MS : null;
+  const lockRemainingMs = unlockAt ? unlockAt - lockNow : 0;
+  const isCheckInLocked = !!unlockAt && lockRemainingMs > 0;
+  const lockProgress = unlockAt ? 1 - lockRemainingMs / LOCK_MS : 1;
+  const lockColor = lockProgressColor(lockProgress);
+  const lastCondition = lastCheckIn ? getCondition(lastCheckIn.pct) : null;
+
   return (
     <div className="cs-root">
       <style>{`
@@ -477,22 +533,34 @@ export default function CleraShieldCheckIn() {
         .cs-shell { width: 100%; max-width: 420px; display: flex; flex-direction: column; min-height: 640px; transition: max-width 200ms ease; }
         @media (min-width: 640px) {
           .cs-shell { max-width: 480px; }
-          .cs-h1 { font-size: 28px; }
+          .cs-h1 { font-size: 31.5px; }
           .cs-card { padding: 34px 30px; }
         }
         @media (min-width: 1024px) {
           .cs-root { align-items: center; }
           .cs-shell { max-width: 520px; }
           .cs-card { padding: 40px 36px; }
-          .cs-pct { font-size: 40px; }
+          .cs-pct { font-size: 45px; }
         }
         .cs-topbar { display: flex; align-items: baseline; justify-content: space-between; padding-bottom: 18px; border-bottom: 1px solid var(--panel-border); margin-bottom: 20px; }
-        .cs-wordmark { font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 15px; letter-spacing: 0.14em; color: var(--text-primary); }
+        .cs-wordmark { font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 17px; letter-spacing: 0.14em; color: var(--text-primary); }
         .cs-wordmark span { color: var(--sig-amber); }
-        .cs-clock { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-muted); letter-spacing: 0.03em; text-align: right; }
-        .cs-signout { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text-muted); background: none; border: none; cursor: pointer; text-decoration: underline; padding: 0; margin-top: 4px; }
+        .cs-clock { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--text-muted); letter-spacing: 0.03em; text-align: right; }
+        .cs-signout {
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 13.5px;
+          letter-spacing: 0.06em;
+          color: var(--text-muted);
+          background: #171C24;
+          border: 1px solid var(--panel-border);
+          border-radius: 3px;
+          cursor: pointer;
+          padding: 7px 12px;
+          margin-top: 8px;
+        }
+        .cs-signout:hover { color: var(--text-primary); border-color: var(--text-muted); }
         .cs-tabs { display: flex; gap: 8px; margin-bottom: 20px; }
-        .cs-tab { flex: 1; text-align: center; padding: 10px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; border: 1px solid var(--panel-border); border-radius: 3px; background: transparent; color: var(--text-muted); cursor: pointer; }
+        .cs-tab { flex: 1; text-align: center; padding: 10px; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; letter-spacing: 0.1em; border: 1px solid var(--panel-border); border-radius: 3px; background: transparent; color: var(--text-muted); cursor: pointer; }
         .cs-tab.active { border-color: var(--sig-amber); color: var(--text-primary); background: #171C24; }
         .cs-progress { display: flex; gap: 6px; margin-bottom: 28px; }
         .cs-seg { flex: 1; height: 4px; border-radius: 2px; background: var(--panel-border); overflow: hidden; }
@@ -500,54 +568,72 @@ export default function CleraShieldCheckIn() {
         .cs-seg-fill.filled { width: 100%; }
         .cs-body { flex: 1; display: flex; flex-direction: column; }
         .cs-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 4px; padding: 28px 24px; flex: 1; display: flex; flex-direction: column; }
-        .cs-eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.18em; color: var(--sig-amber); margin-bottom: 14px; }
-        .cs-h1 { font-family: 'Oswald', sans-serif; font-weight: 500; font-size: 26px; line-height: 1.25; margin: 0 0 8px 0; color: var(--text-primary); }
-        .cs-sub { color: var(--text-muted); font-size: 14px; line-height: 1.5; margin: 0 0 28px 0; }
+        .cs-card-compact { flex: 0 0 auto; }
+        .cs-card-compact .cs-begin-btn { margin-top: 10px; }
+        .cs-eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; letter-spacing: 0.18em; color: var(--sig-amber); margin-bottom: 14px; }
+        .cs-h1 { font-family: 'Oswald', sans-serif; font-weight: 500; font-size: 29px; line-height: 1.25; margin: 0 0 8px 0; color: var(--text-primary); }
+        .cs-sub { color: var(--text-muted); font-size: 15.5px; line-height: 1.5; margin: 0 0 28px 0; }
         .cs-options { display: flex; flex-direction: column; gap: 10px; }
         .cs-opt { text-align: left; background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 16px 18px; color: var(--text-primary); font-family: 'Inter', sans-serif; cursor: pointer; display: flex; flex-direction: column; gap: 2px; transition: border-color 150ms, background 150ms, transform 100ms; }
         .cs-opt:hover { border-color: var(--sig-amber); background: #1C222C; }
         .cs-opt:active { transform: scale(0.99); }
-        .cs-opt-label { font-size: 15px; font-weight: 600; }
-        .cs-opt-sub { font-size: 12.5px; color: var(--text-muted); }
-        .cs-begin-btn { margin-top: auto; background: var(--sig-amber); color: #14100A; border: none; border-radius: 3px; padding: 16px; font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 14px; letter-spacing: 0.08em; cursor: pointer; }
+        .cs-opt-label { font-size: 17px; font-weight: 600; }
+        .cs-opt-sub { font-size: 14px; color: var(--text-muted); }
+        .cs-begin-btn { margin-top: auto; background: var(--sig-amber); color: #14100A; border: none; border-radius: 3px; padding: 16px; font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 15.5px; letter-spacing: 0.08em; cursor: pointer; }
         .cs-begin-btn:hover { filter: brightness(1.05); }
         .cs-begin-btn:disabled { opacity: 0.6; cursor: default; }
-        .cs-secondary-btn { margin-top: 12px; background: transparent; color: var(--text-muted); border: 1px solid var(--panel-border); border-radius: 3px; padding: 14px; font-family: 'Inter', sans-serif; font-size: 13px; cursor: pointer; }
+        .cs-secondary-btn { margin-top: 12px; background: transparent; color: var(--text-muted); border: 1px solid var(--panel-border); border-radius: 3px; padding: 14px; font-family: 'Inter', sans-serif; font-size: 14.5px; cursor: pointer; }
         .cs-secondary-btn:hover { color: var(--text-primary); border-color: var(--text-muted); }
         .gauge-wrap { display: flex; justify-content: center; margin: 6px 0 4px 0; }
         .gauge-svg { width: 100%; max-width: 280px; }
         .cs-readout { text-align: center; margin-top: -46px; margin-bottom: 18px; }
-        .cs-pct { font-family: 'IBM Plex Mono', monospace; font-size: 34px; font-weight: 600; line-height: 1; }
-        .cs-pct-label { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text-muted); letter-spacing: 0.14em; margin-top: 4px; }
-        .cs-condition-badge { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.12em; padding: 6px 12px; border-radius: 2px; display: inline-block; margin-bottom: 16px; border: 1px solid currentColor; }
+        .cs-pct { font-family: 'IBM Plex Mono', monospace; font-size: 38px; font-weight: 600; line-height: 1; }
+        .cs-pct-label { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-muted); letter-spacing: 0.14em; margin-top: 4px; }
+        .cs-condition-badge { font-family: 'IBM Plex Mono', monospace; font-size: 13.5px; letter-spacing: 0.12em; padding: 6px 12px; border-radius: 2px; display: inline-block; margin-bottom: 16px; border: 1px solid currentColor; }
         .cs-incident-banner { display: flex; align-items: center; gap: 10px; background: rgba(214, 72, 74, 0.1); border: 1px solid var(--sig-red); border-radius: 3px; padding: 12px 14px; margin-bottom: 20px; }
         .cs-incident-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--sig-red); flex-shrink: 0; }
-        .cs-incident-text { font-size: 12.5px; line-height: 1.4; }
-        .cs-incident-text b { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.08em; color: var(--sig-red); margin-bottom: 2px; }
+        .cs-incident-text { font-size: 14px; line-height: 1.4; }
+        .cs-incident-text b { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; letter-spacing: 0.08em; color: var(--sig-red); margin-bottom: 2px; }
         .cs-breakdown { display: flex; flex-direction: column; gap: 8px; margin: 18px 0; padding-top: 18px; border-top: 1px solid var(--panel-border); }
-        .cs-breakdown-row { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--text-muted); font-family: 'IBM Plex Mono', monospace; }
+        .cs-breakdown-row { display: flex; justify-content: space-between; font-size: 14px; color: var(--text-muted); font-family: 'IBM Plex Mono', monospace; }
         .cs-breakdown-row b { color: var(--text-primary); font-weight: 500; }
-        .cs-footer-note { font-size: 11px; color: var(--text-muted); text-align: center; margin-top: 18px; line-height: 1.5; }
+        .cs-footer-note { font-size: 12.5px; color: var(--text-muted); text-align: center; margin-top: 18px; line-height: 1.5; }
         .cs-streak-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
-        .cs-streak-num { font-family: 'IBM Plex Mono', monospace; font-size: 28px; font-weight: 600; color: var(--sig-amber); line-height: 1; }
-        .cs-streak-label { font-size: 10px; color: var(--text-muted); letter-spacing: 0.1em; font-family: 'IBM Plex Mono', monospace; margin-top: 4px; }
+        .cs-streak-num { font-family: 'IBM Plex Mono', monospace; font-size: 31.5px; font-weight: 600; color: var(--sig-amber); line-height: 1; }
+        .cs-streak-label { font-size: 11px; color: var(--text-muted); letter-spacing: 0.1em; font-family: 'IBM Plex Mono', monospace; margin-top: 4px; }
         .cs-day-chips { display: flex; gap: 6px; }
         .cs-day-chip { width: 24px; height: 24px; border-radius: 3px; border: 1px solid var(--panel-border); }
         .cs-chart-wrap { height: 170px; margin: 4px -6px 22px -6px; }
         .cs-condition-dist { display: flex; gap: 8px; margin-bottom: 16px; }
-        .cs-dist-chip { flex: 1; text-align: center; padding: 10px 4px; border-radius: 3px; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.04em; border: 1px solid currentColor; }
+        .cs-dist-chip { flex: 1; text-align: center; padding: 10px 4px; border-radius: 3px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.04em; border: 1px solid currentColor; }
         .cs-stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
         .cs-stat-card { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 6px; text-align: center; }
-        .cs-stat-value { font-family: 'IBM Plex Mono', monospace; font-size: 18px; font-weight: 600; }
-        .cs-stat-label { font-size: 9.5px; color: var(--text-muted); letter-spacing: 0.06em; margin-top: 4px; font-family: 'IBM Plex Mono', monospace; }
+        .cs-stat-value { font-family: 'IBM Plex Mono', monospace; font-size: 20px; font-weight: 600; }
+        .cs-stat-label { font-size: 10.5px; color: var(--text-muted); letter-spacing: 0.06em; margin-top: 4px; font-family: 'IBM Plex Mono', monospace; }
+        .cs-lock-badge {
+          position: absolute;
+          top: 18px;
+          right: 18px;
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 13.5px;
+          padding: 6px 11px;
+          border-radius: 20px;
+          border: 1px solid currentColor;
+          background: #171C24;
+          transition: color 1s linear, border-color 1s linear;
+        }
+        .cs-lock-dot { width: 8px; height: 8px; border-radius: 50%; transition: background 1s linear; }
         .cs-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
-        .cs-field label { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.08em; color: var(--text-muted); }
-        .cs-field input { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 14px; color: var(--text-primary); font-family: 'Inter', sans-serif; font-size: 14px; }
+        .cs-field label { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.08em; color: var(--text-muted); }
+        .cs-field input { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 14px; color: var(--text-primary); font-family: 'Inter', sans-serif; font-size: 15.5px; }
         .cs-field input:focus { outline: none; border-color: var(--sig-amber); }
-        .cs-auth-error { font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--sig-red); margin-bottom: 14px; line-height: 1.5; }
-        .cs-auth-notice { font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--sig-green); margin-bottom: 14px; line-height: 1.5; }
-        .cs-auth-toggle { text-align: center; margin-top: 14px; font-size: 12.5px; color: var(--text-muted); }
-        .cs-auth-toggle button { background: none; border: none; color: var(--sig-amber); cursor: pointer; font-size: 12.5px; text-decoration: underline; padding: 0; }
+        .cs-auth-error { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--sig-red); margin-bottom: 14px; line-height: 1.5; }
+        .cs-auth-notice { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--sig-green); margin-bottom: 14px; line-height: 1.5; }
+        .cs-auth-toggle { text-align: center; margin-top: 14px; font-size: 14px; color: var(--text-muted); }
+        .cs-auth-toggle button { background: none; border: none; color: var(--sig-amber); cursor: pointer; font-size: 14px; text-decoration: underline; padding: 0; }
       `}</style>
 
       <link
@@ -682,14 +768,39 @@ export default function CleraShieldCheckIn() {
                 </div>
               )}
 
-              {view === "checkin" && step === -1 && (
-                <div className="cs-card">
+              {view === "checkin" && step === -1 && isCheckInLocked && (
+                <div className="cs-card cs-card-compact" style={{ position: "relative" }}>
+                  <div
+                    className="cs-lock-badge"
+                    style={{ borderColor: lockColor, color: lockColor }}
+                  >
+                    <span className="cs-lock-dot" style={{ background: lockColor }} />
+                    {formatCountdown(lockRemainingMs)}
+                  </div>
+                  <div className="cs-eyebrow">CHECK-IN COMPLETE</div>
+                  <h1 className="cs-h1">You're set for today.</h1>
+                  <p className="cs-sub">
+                    Your next check-in unlocks in the countdown above. Head to Trends to see
+                    how today compares.
+                  </p>
+                  {lastCondition && (
+                    <div className="cs-condition-badge" style={{ color: lastCondition.color }}>
+                      {lastCondition.code} · {lastCheckIn.pct}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {view === "checkin" && step === -1 && !isCheckInLocked && (
+                <div className="cs-card cs-card-compact">
                   <div className="cs-eyebrow">DAILY READINESS CHECK-IN</div>
                   <h1 className="cs-h1">Sixty seconds before shift.</h1>
                   <p className="cs-sub">
-                    Four quick questions on sleep, stress, incident exposure, and recovery.
-                    Your readiness signal helps you catch small problems before they become
-                    big ones — no one else sees your raw answers.
+                    Four quick questions about sleep, stress, critical incidents, and recovery
+                    create your personal readiness signal. It's an easy way to recognize when
+                    something may be shifting before it affects your health, performance, or
+                    relationships. Your individual responses remain private and under your
+                    control.
                   </p>
                   <button className="cs-begin-btn" onClick={() => setStep(0)}>
                     BEGIN CHECK-IN
