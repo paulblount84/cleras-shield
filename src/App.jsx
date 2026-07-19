@@ -485,7 +485,7 @@ function suggestedInterventionIds(pct, incidentFlag) {
 function getCondition(pct) {
   if (pct >= 75)
     return {
-      code: "COND. GREEN",
+      code: "HIGH READINESS",
       dbValue: "green",
       color: "var(--sig-green)",
       hex: "#3FB871",
@@ -494,7 +494,7 @@ function getCondition(pct) {
     };
   if (pct >= 45)
     return {
-      code: "COND. AMBER",
+      code: "MODERATE READINESS",
       dbValue: "amber",
       color: "var(--sig-amber)",
       hex: "#E8833F",
@@ -502,7 +502,7 @@ function getCondition(pct) {
       note: "Recovery is lagging. Pace yourself and check in with a peer if it persists.",
     };
   return {
-    code: "COND. RED",
+    code: "LOW READINESS",
     dbValue: "red",
     color: "var(--sig-red)",
     hex: "#D6484A",
@@ -630,10 +630,22 @@ function BreathingPacer({ onCycleComplete }) {
 /* ---------- Trend chart bits ---------- */
 
 function TrendDot(props) {
-  const { cx, cy, payload } = props;
+  const { cx, cy, payload, index } = props;
   if (cx == null || cy == null || payload.pct == null) return null;
   const color = getCondition(payload.pct).hex;
-  return <circle cx={cx} cy={cy} r={3.5} fill={color} stroke="#0A0D12" strokeWidth={1} />;
+  const delay = `${((index || 0) % 5) * 0.25}s`;
+  return (
+    <g>
+      <circle
+        cx={cx}
+        cy={cy}
+        r={3.5}
+        className="cs-trend-pulse-ring"
+        style={{ fill: color, animationDelay: delay }}
+      />
+      <circle cx={cx} cy={cy} r={3.5} fill={color} stroke="#0A0D12" strokeWidth={1} />
+    </g>
+  );
 }
 
 function TrendTooltip({ active, payload, label }) {
@@ -1399,9 +1411,9 @@ export default function CleraShieldCheckIn() {
 
   const dist = present14.reduce(
     (acc, d) => {
-      const code = getCondition(d.entry.pct).code;
-      if (code.includes("GREEN")) acc.green++;
-      else if (code.includes("AMBER")) acc.amber++;
+      const dbValue = getCondition(d.entry.pct).dbValue;
+      if (dbValue === "green") acc.green++;
+      else if (dbValue === "amber") acc.amber++;
       else acc.red++;
       return acc;
     },
@@ -1541,6 +1553,17 @@ export default function CleraShieldCheckIn() {
         .cs-day-chips { display: flex; gap: 6px; }
         .cs-day-chip { width: 24px; height: 24px; border-radius: 3px; border: 1px solid var(--panel-border); }
         .cs-chart-wrap { height: 170px; margin: 4px -6px 22px -6px; }
+        .cs-trend-pulse-ring {
+          transform-box: fill-box;
+          transform-origin: center;
+          opacity: 0.55;
+          animation: cs-trend-pulse 2.2s ease-out infinite;
+        }
+        @keyframes cs-trend-pulse {
+          0% { transform: scale(1); opacity: 0.55; }
+          70% { transform: scale(3.2); opacity: 0; }
+          100% { transform: scale(3.2); opacity: 0; }
+        }
         .cs-condition-dist { display: flex; gap: 8px; margin-bottom: 16px; }
         .cs-dist-chip { flex: 1; text-align: center; padding: 10px 4px; border-radius: 3px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; letter-spacing: 0.04em; border: 1px solid currentColor; }
         .cs-stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
