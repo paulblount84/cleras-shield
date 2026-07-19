@@ -41,10 +41,6 @@ function appendSetCookie(res, cookie) {
   res.setHeader("Set-Cookie", list);
 }
 
-// Sets/replaces both session cookies from a Supabase auth response shape
-// ({ access_token, refresh_token, expires_in }). Refresh token is given a
-// generous 30-day ceiling — Supabase rotates it on every refresh, so this is
-// just an outer bound, not how long a session actually lasts unused.
 export function setSessionCookies(res, { access_token, refresh_token, expires_in }) {
   appendSetCookie(res, cookieString(ACCESS_COOKIE, access_token, expires_in || 3600));
   if (refresh_token) {
@@ -57,8 +53,6 @@ export function clearSessionCookies(res) {
   appendSetCookie(res, cookieString(REFRESH_COOKIE, "", 0));
 }
 
-// Thin wrapper around fetch() to Supabase — always sends the anon key,
-// always parses JSON defensively (Supabase error bodies aren't always JSON).
 export async function supaFetch(path, options = {}) {
   const res = await fetch(`${SUPABASE_URL}${path}`, {
     ...options,
@@ -84,9 +78,6 @@ export async function refreshTokens(refreshToken) {
   });
 }
 
-// Returns a usable access token for this request. If only a refresh token is
-// present (access cookie missing/expired-and-cleared), refreshes and updates
-// cookies on the response before returning.
 async function getAccessToken(req, res) {
   const cookies = parseCookies(req);
   if (cookies[ACCESS_COOKIE]) return cookies[ACCESS_COOKIE];
@@ -97,9 +88,6 @@ async function getAccessToken(req, res) {
   return refreshed.data.access_token;
 }
 
-// Calls fn(accessToken) -> {ok,status,data}. On a 401 (token looked present
-// but Supabase rejected it — e.g. it expired between requests), refreshes
-// once via the refresh-token cookie and retries fn exactly once.
 export async function withAuth(req, res, fn) {
   const token = await getAccessToken(req, res);
   if (!token) return { ok: false, status: 401, data: { message: "Not authenticated" } };
