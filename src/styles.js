@@ -403,3 +403,4 @@ export const CS_STYLES = `
         .cs-auth-notice { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; color: var(--sig-green); margin-bottom: 14px; line-height: 1.5; }
         .cs-auth-toggle { text-align: center; margin-top: 14px; font-size: 14px; color: var(--text-muted); }
         .cs-auth-toggle button { background: none; border: none; color: var(--sig-amber); cursor: pointer; font-size: 14px; text-decoration: underline; padding: 0; }
+`;
