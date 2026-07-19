@@ -662,6 +662,3 @@ export default function CleraShieldCheckIn() {
         )}
       </div>
     </div>
-  );
-}
-test
