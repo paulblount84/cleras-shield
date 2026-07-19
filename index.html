@@ -30,7 +30,7 @@
         if (root && root.children.length === 0) {
           showError('Timeout: #root is still empty after 3s. main.jsx likely never executed — check Network tab for a 404 or MIME-type error on /src/main.jsx.');
         }
-      }, 3000);
+      }, 500);
     </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
