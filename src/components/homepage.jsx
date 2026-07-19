@@ -1,4 +1,4 @@
-function Homepage({ onGetStarted, onSignIn }) {
+function homepage({ onGetStarted, onSignIn }) {
   return (
     <div className="cs-home">
       <section id="overview" className="cs-home-section cs-home-hero">
