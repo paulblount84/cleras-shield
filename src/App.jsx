@@ -1,525 +1,34 @@
-import Homepage from "./components/Homepage";
 import React, { useState, useMemo, useEffect } from "react";
+import Homepage from "./components/Homepage";
+import Auth from "./components/Auth";
+import CheckIn from "./components/CheckIn";
+import Dashboard from "./components/Dashboard";
+import Interventions from "./components/Interventions";
+import useMfa from "./hooks/useMfa";
 import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-} from "recharts";
+  getSession,
+  signUpRequest,
+  signInRequest,
+  logoutRequest,
+  requestPasswordReset,
+  confirmPasswordReset,
+  fetchCheckIns,
+  submitCheckIn,
+  fetchInterventionCompletions,
+  logInterventionCompletion,
+} from "./api";
+import { WEIGHTS, ALL_STEPS, getCondition } from "./scoring";
+import { dateKey, shortLabel, LOCK_MS, lockProgressColor } from "./utils";
+import { CS_STYLES } from "./styles";
 
-/* ---------- API client (same-origin, cookie-based) ----------
-   Every call here hits this app's own /api/* serverless functions, never
-   Supabase directly. The functions hold the session as httpOnly cookies —
-   this file (and every other line of client JS) never sees an access token
-   or refresh token at all, not even transiently, except for the one
-   unavoidable case of a password-recovery token arriving via URL hash (see
-   the reset-confirm handling below), which is held only in memory for the
-   few seconds until it's handed to the server and never stored.
-------------------------------------------------------------------------------- */
-
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  let data = {};
-  try {
-    data = await res.json();
-  } catch (e) {
-    /* empty body */
-  }
-  if (!res.ok) {
-    const err = new Error((data && data.message) || "Something went wrong. Please try again.");
-    err.status = res.status;
-    err.body = data;
-    throw err;
-  }
-  return data;
-}
-
-function qrCodeToImageSrc(qr) {
-  if (!qr) return "";
-  if (qr.startsWith("data:")) return qr; // already a usable data URL
-  return `data:image/svg+xml;utf8,${encodeURIComponent(qr)}`; // raw SVG markup — encode it ourselves
-}
-
-function getSession() {
-  return api("/api/auth/session");
-}
-
-function signUpRequest(email, password, role) {
-  return api("/api/auth/signup", { method: "POST", body: JSON.stringify({ email, password, role }) });
-}
-
-function signInRequest(email, password) {
-  return api("/api/auth/signin", { method: "POST", body: JSON.stringify({ email, password }) });
-}
-
-function logoutRequest() {
-  return api("/api/auth/logout", { method: "POST" }).catch(() => {});
-}
-
-function requestPasswordReset(email) {
-  return api("/api/auth/reset-request", { method: "POST", body: JSON.stringify({ email }) }).catch(() => {});
-}
-
-function confirmPasswordReset({ accessToken, refreshToken, expiresIn, newPassword }) {
-  return api("/api/auth/reset-confirm", {
-    method: "POST",
-    body: JSON.stringify({ accessToken, refreshToken, expiresIn, newPassword }),
-  });
-}
-
-/* ---------- TOTP MFA ---------- */
-
-function fetchUserFactors() {
-  return api("/api/auth/session").then((d) => d.factors || []);
-}
-
-function enrollTotpFactor() {
-  return api("/api/mfa/enroll", { method: "POST" });
-}
-
-function unenrollFactor(factorId) {
-  return api("/api/mfa/unenroll", { method: "POST", body: JSON.stringify({ factorId }) }).catch(() => {});
-}
-
-function verifyMfaChallenge(factorId, code, pendingToken) {
-  return api("/api/mfa/verify", {
-    method: "POST",
-    body: JSON.stringify({ factorId, code, pendingToken }),
-  });
-}
-
-/* ---------- Check-ins & interventions ---------- */
-
-function fetchCheckIns(fromDate) {
-  return api(`/api/checkins/list?from=${fromDate}`);
-}
-
-function submitCheckIn({ sleepScore, stressScore, recoveryScore, incidentLabel }) {
-  return api("/api/checkins/submit", {
-    method: "POST",
-    body: JSON.stringify({ sleepScore, stressScore, recoveryScore, incidentLabel }),
-  });
-}
-
-function fetchInterventionCompletions() {
-  return api("/api/interventions/list");
-}
-
-function logInterventionCompletion(interventionId) {
-  return api("/api/interventions/log", { method: "POST", body: JSON.stringify({ interventionId }) });
-}
-
-/* ---------- Scoring model ---------- */
-
-const WEIGHTS = { sleep: 0.4, stress: 0.3, recovery: 0.3 };
-
-const QUESTIONS = [
-  {
-    key: "sleep",
-    label: "SLEEP",
-    prompt: "How much sleep did you get last night?",
-    options: [
-      { label: "Under 4h", sub: "Barely any rest", value: 20 },
-      { label: "4–5h", sub: "Short", value: 45 },
-      { label: "6–7h", sub: "Reasonable", value: 75 },
-      { label: "8h+", sub: "Full night", value: 100 },
-    ],
-  },
-  {
-    key: "stress",
-    label: "STRESS",
-    prompt: "How would you rate your stress level right now?",
-    options: [
-      { label: "Overwhelming", sub: "Hard to manage", value: 15 },
-      { label: "High", sub: "Noticeable strain", value: 40 },
-      { label: "Manageable", sub: "Under control", value: 70 },
-      { label: "Low", sub: "Steady", value: 100 },
-    ],
-  },
-  {
-    key: "recovery",
-    label: "RECOVERY",
-    prompt: "How recovered do you feel going into today?",
-    options: [
-      { label: "Depleted", sub: "Running on empty", value: 15 },
-      { label: "Low", sub: "Still catching up", value: 40 },
-      { label: "Moderate", sub: "Mostly recharged", value: 70 },
-      { label: "Fully recovered", sub: "Ready to go", value: 100 },
-    ],
-  },
+const NAV_ITEMS = [
+  { id: "overview", label: "Overview" },
+  { id: "why-it-matters", label: "Why It Matters" },
+  { id: "how-it-works", label: "How It Works" },
+  { id: "privacy-security", label: "Privacy & Security" },
+  { id: "who-its-for", label: "Who It's For" },
+  { id: "signin", label: "Sign In" },
 ];
-
-const INCIDENT_QUESTION = {
-  key: "incident",
-  label: "INCIDENT",
-  prompt: "Any critical incident exposure on your last shift?",
-  options: [
-    { label: "Critical incident", sub: "High-severity call", flag: true },
-    { label: "Minor call", sub: "Routine stress", flag: false },
-    { label: "None", sub: "No exposure", flag: false },
-  ],
-};
-
-const ALL_STEPS = [QUESTIONS[0], QUESTIONS[1], INCIDENT_QUESTION, QUESTIONS[2]];
-
-/* ---------- Interventions library ---------- */
-
-const INTERVENTIONS = [
-  {
-    id: "paced-breathing",
-    modalities: ["CBT", "DBT"],
-    title: "Paced Breathing",
-    duration: "~1 min",
-    blurb: "Slow your exhale to bring your heart rate down.",
-    type: "breathing",
-    steps: [
-      "A slower exhale than inhale signals safety to your nervous system. Follow the circle: breathe in as it expands, out as it contracts.",
-    ],
-  },
-  {
-    id: "tipp",
-    modalities: ["DBT"],
-    title: "TIPP",
-    duration: "~3 min",
-    blurb: "For genuinely acute distress, right after a hard call.",
-    type: "steps",
-    steps: [
-      "T — Temperature. Splash cold water on your face, or hold something cold. This triggers a reflex that drops your heart rate fast.",
-      "I — Intense Exercise. If you can, do 30-60 seconds of something physical — push-ups, running in place. Burn off the surge.",
-      "P — Paced Breathing. Slow your exhale so it's longer than your inhale. A few rounds is enough.",
-      "P — Paired Muscle Relaxation. Tense one muscle group hard for 5 seconds, then release. Work through your body, one group at a time.",
-    ],
-  },
-  {
-    id: "grounding-54321",
-    modalities: ["DBT", "ACT"],
-    title: "5-4-3-2-1 Grounding",
-    duration: "~2 min",
-    blurb: "Interrupt a spiral and land back in the present.",
-    type: "steps",
-    steps: [
-      "Name 5 things you can see around you right now.",
-      "Name 4 things you can physically feel — the ground, your clothes, the air.",
-      "Name 3 things you can hear.",
-      "Name 2 things you can smell.",
-      "Name 1 thing you can taste, or one thing you appreciate about yourself right now.",
-    ],
-  },
-  {
-    id: "stop-skill",
-    modalities: ["DBT"],
-    title: "STOP Skill",
-    duration: "~1 min",
-    blurb: "For when you're about to react and shouldn't.",
-    type: "steps",
-    steps: [
-      "S — Stop. Don't react. Just pause exactly where you are.",
-      "T — Take a step back. Take a breath. Create space, physically or mentally, before you respond.",
-      "O — Observe. What's happening, inside and around you, right now? Just notice — don't judge it.",
-      "P — Proceed mindfully. Ask: what response actually fits this moment, and who I want to be?",
-    ],
-  },
-  {
-    id: "quick-thought-check",
-    modalities: ["CBT"],
-    title: "Quick Thought Check",
-    duration: "~2 min",
-    blurb: "A condensed thought record for a shift, not a therapy session.",
-    type: "steps",
-    steps: [
-      "What's the thought that's stuck with you right now?",
-      "What's the evidence this thought is completely true? What's the evidence against it?",
-      "If a partner or colleague had this exact thought after this exact shift, what would you tell them?",
-      "What's a more balanced way to see it?",
-    ],
-  },
-  {
-    id: "spot-the-distortion",
-    modalities: ["CBT"],
-    title: "Spot The Distortion",
-    duration: "~1 min",
-    blurb: "A quick reference for recognizing unhelpful thinking patterns.",
-    type: "steps",
-    steps: [
-      "All-or-Nothing: \"I completely botched that call.\" More accurate: \"That part didn't go how I wanted.\"",
-      "Catastrophizing: \"This is going to end my career.\" More accurate: \"This was a bad moment, not a verdict.\"",
-      "Mind Reading: \"My sergeant thinks I'm weak for asking for help.\" More accurate: \"I don't actually know what they think.\"",
-      "Should Statements: \"I should never feel rattled by this job.\" More accurate: \"It makes sense that this affected me.\"",
-      "Discounting the Positive: \"Anyone would've made that same good call.\" More accurate: \"That was a good call, and I made it.\"",
-    ],
-  },
-  {
-    id: "name-it",
-    modalities: ["ACT"],
-    title: "Name It",
-    duration: "~1 min",
-    blurb: "Create distance from a thought that's stuck.",
-    type: "steps",
-    steps: [
-      "Notice the thought that's bothering you.",
-      "Now say it to yourself starting with \"I'm having the thought that...\" — for example, \"I'm having the thought that I failed.\"",
-      "Notice: the thought is something your mind is doing, not a fact about you. You can hold it loosely instead of fusing with it.",
-    ],
-  },
-  {
-    id: "radical-acceptance",
-    modalities: ["DBT"],
-    title: "Radical Acceptance",
-    duration: "~2 min",
-    blurb: "For something that already happened and can't be changed.",
-    type: "steps",
-    steps: [
-      "Something happened that you wish hadn't. Acceptance doesn't mean you're okay with it — it means you stop fighting the fact that it happened.",
-      "Say to yourself: \"This happened. Fighting that fact only adds more pain on top of what's already there.\"",
-      "Ask: what's one thing within my control right now, given that this is reality?",
-    ],
-  },
-  {
-    id: "values-checkin",
-    modalities: ["ACT"],
-    title: "Values Check-In",
-    duration: "~2 min",
-    blurb: "For a low-motivation day — reconnect with what matters.",
-    type: "steps",
-    steps: [
-      "Zoom out for a second. What matters to you in how you show up at this job — not what you're supposed to say, what actually matters to you?",
-      "Given today, what's one small action in the next hour that fits that?",
-      "That's it. Small and doable beats big and abandoned.",
-    ],
-  },
-];
-
-const INTERVENTION_DOMAINS = [
-  { id: "CBT", label: "CBT", full: "Cognitive Behavioral Therapy" },
-  { id: "DBT", label: "DBT", full: "Dialectical Behavior Therapy" },
-  { id: "ACT", label: "ACT", full: "Acceptance & Commitment Therapy" },
-];
-
-function suggestedInterventionIds(pct, incidentFlag) {
-  if (incidentFlag) return ["tipp", "radical-acceptance"];
-  if (pct < 45) return ["paced-breathing", "quick-thought-check"];
-  if (pct < 75) return ["stop-skill", "values-checkin"];
-  return [];
-}
-
-// Tiers a raw 0-100 score using the same thresholds as readiness. For stress,
-// pass invertLabel=true: the underlying score is stored "inverted" (100 =
-// calm, 15 = overwhelming) to feed the weighted formula correctly, but the
-// displayed number is un-inverted (100 - score) so a bigger number reads as
-// "more stressed" — invertLabel keeps the HIGH/LOW word matching that.
-function tierOf(raw, invertLabel) {
-  if (raw >= 75) return { color: "var(--sig-green)", label: invertLabel ? "LOW" : "HIGH" };
-  if (raw >= 45) return { color: "var(--sig-amber)", label: "MODERATE" };
-  return { color: "var(--sig-red)", label: invertLabel ? "HIGH" : "LOW" };
-}
-
-function getCondition(pct) {
-  if (pct >= 75)
-    return {
-      code: "HIGH READINESS",
-      dbValue: "green",
-      color: "var(--sig-green)",
-      hex: "#3FB871",
-      headline: "Ready for duty.",
-      note: "Your indicators are steady. Standard vigilance.",
-    };
-  if (pct >= 45)
-    return {
-      code: "MODERATE READINESS",
-      dbValue: "amber",
-      color: "var(--sig-amber)",
-      hex: "#E8833F",
-      headline: "Elevated load.",
-      note: "Recovery is lagging. Pace yourself and check in with a peer if it persists.",
-    };
-  return {
-    code: "LOW READINESS",
-    dbValue: "red",
-    color: "var(--sig-red)",
-    hex: "#D6484A",
-    headline: "Readiness compromised.",
-    note: "Multiple factors are stacked against you today. Talk to your supervisor or peer support before shift.",
-  };
-}
-
-/* ---------- Lock timer helpers ---------- */
-
-const LOCK_MS = 24 * 60 * 60 * 1000;
-
-function hexToRgb(hex) {
-  const v = hex.replace("#", "");
-  return { r: parseInt(v.substring(0, 2), 16), g: parseInt(v.substring(2, 4), 16), b: parseInt(v.substring(4, 6), 16) };
-}
-
-function lerpColor(hexA, hexB, t) {
-  const a = hexToRgb(hexA);
-  const b = hexToRgb(hexB);
-  const r = Math.round(a.r + (b.r - a.r) * t);
-  const g = Math.round(a.g + (b.g - a.g) * t);
-  const bl = Math.round(a.b + (b.b - a.b) * t);
-  return `rgb(${r}, ${g}, ${bl})`;
-}
-
-function lockProgressColor(t) {
-  const clamped = Math.max(0, Math.min(1, t));
-  if (clamped < 0.5) return lerpColor("#D6484A", "#E8833F", clamped / 0.5);
-  return lerpColor("#E8833F", "#3FB871", (clamped - 0.5) / 0.5);
-}
-
-function formatCountdown(ms) {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const h = String(Math.floor(total / 3600)).padStart(2, "0");
-  const m = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
-  const s = String(total % 60).padStart(2, "0");
-  return `${h}:${m}:${s}`;
-}
-
-/* ---------- Date helpers ---------- */
-
-function dateKey(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function shortLabel(key) {
-  const [y, m, d] = key.split("-").map(Number);
-  return `${m}/${d}`;
-}
-
-/* ---------- Gauge ---------- */
-
-function Gauge({ pct, color }) {
-  const r = 80;
-  const circumference = Math.PI * r;
-  const offset = circumference * (1 - pct / 100);
-
-  return (
-    <svg viewBox="0 0 200 118" className="gauge-svg">
-      <path
-        d="M 20 100 A 80 80 0 0 1 180 100"
-        fill="none"
-        stroke="var(--panel-border)"
-        strokeWidth="14"
-        strokeLinecap="round"
-      />
-      <path
-        d="M 20 100 A 80 80 0 0 1 180 100"
-        fill="none"
-        stroke={color}
-        strokeWidth="14"
-        strokeLinecap="round"
-        strokeDasharray={circumference}
-        strokeDashoffset={offset}
-        style={{ transition: "stroke-dashoffset 900ms cubic-bezier(.2,.8,.2,1), stroke 400ms" }}
-      />
-    </svg>
-  );
-}
-
-/* ---------- Breathing pacer ---------- */
-
-function BreathingPacer({ onCycleComplete }) {
-  const [phase, setPhase] = useState("inhale"); // 'inhale' | 'hold' | 'exhale'
-  const [cycles, setCycles] = useState(0);
-  const PHASE_MS = { inhale: 4000, hold: 1000, exhale: 6000 };
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      if (phase === "inhale") setPhase("hold");
-      else if (phase === "hold") setPhase("exhale");
-      else {
-        setPhase("inhale");
-        setCycles((c) => {
-          const next = c + 1;
-          if (onCycleComplete) onCycleComplete(next);
-          return next;
-        });
-      }
-    }, PHASE_MS[phase]);
-    return () => clearTimeout(t);
-  }, [phase]);
-
-  const scale = phase === "inhale" ? 1 : phase === "hold" ? 1 : 0.55;
-  const label = phase === "inhale" ? "IN" : phase === "hold" ? "HOLD" : "OUT";
-  const duration = phase === "inhale" ? 4000 : phase === "hold" ? 200 : 6000;
-
-  return (
-    <div className="cs-breathe-wrap">
-      <div
-        className="cs-breathe-circle"
-        style={{ transform: `scale(${scale})`, transitionDuration: `${duration}ms` }}
-      >
-        <span>{label}</span>
-      </div>
-      <div className="cs-breathe-cycles">{cycles} cycles</div>
-    </div>
-  );
-}
-
-/* ---------- Trend chart bits ---------- */
-
-function TrendDot(props) {
-  const { cx, cy, payload, index } = props;
-  if (cx == null || cy == null || payload.pct == null) return null;
-  const color = getCondition(payload.pct).hex;
-  const delay = `${((index || 0) % 5) * 0.25}s`;
-  return (
-    <g>
-      <circle
-        cx={cx}
-        cy={cy}
-        r={3.5}
-        className="cs-trend-pulse-ring"
-        style={{ fill: color, animationDelay: delay }}
-      />
-      <circle cx={cx} cy={cy} r={3.5} fill={color} stroke="#0A0D12" strokeWidth={1} />
-    </g>
-  );
-}
-
-function TrendTooltip({ active, payload, label }) {
-  if (!active || !payload || !payload.length || payload[0].value == null) return null;
-  const p = payload[0].payload;
-  const cond = getCondition(p.pct);
-  return (
-    <div
-      style={{
-        background: "#171C24",
-        border: "1px solid #232B35",
-        borderRadius: 3,
-        padding: "8px 10px",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-        fontSize: 11,
-      }}
-    >
-      <div style={{ color: "#7E8896", marginBottom: 4 }}>{label}</div>
-      <div style={{ color: cond.hex, fontWeight: 600 }}>
-        {p.pct} · {cond.code}
-      </div>
-    </div>
-  );
-}
-
-const ROLE_OPTIONS = [
-  "Police Officer",
-  "Sheriff Deputy",
-  "Public Safety Dispatcher",
-  "Custody Officer",
-  "Public Service Officer",
-  "Community Service Officer",
-  "Police Cadet",
-];
-
-/* ---------- Main ---------- */
 
 export default function CleraShieldCheckIn() {
   const [session, setSession] = useState(null); // { userId, email } — no tokens ever live here
@@ -546,23 +55,9 @@ export default function CleraShieldCheckIn() {
   const [newPassword, setNewPassword] = useState("");
   const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
 
-  // MFA step-up state. `mfaPendingToken` is only ever populated for the
-  // sign-in-time "account already has 2FA" case, where the server
-  // deliberately withholds cookies until the challenge is verified (see
-  // api/auth/signin.js) — it's held only in memory and discarded the moment
-  // MFA resolves or is cancelled. For the "just signed up / never enrolled"
-  // offer-and-setup path, cookies already exist (there's no factor to gate
-  // on yet), so those calls are plain cookie-authenticated requests.
-  const [mfaStage, setMfaStage] = useState(null); // null | 'offer' | 'setup' | 'challenge'
-  const [pendingUser, setPendingUser] = useState(null);
-  const [mfaPendingToken, setMfaPendingToken] = useState(null);
-  const [mfaFactorId, setMfaFactorId] = useState(null);
-  const [mfaChallengeId, setMfaChallengeId] = useState(null);
-  const [mfaQrSvg, setMfaQrSvg] = useState("");
-  const [mfaSecret, setMfaSecret] = useState("");
-  const [mfaCode, setMfaCode] = useState("");
-  const [mfaError, setMfaError] = useState("");
-  const [mfaLoading, setMfaLoading] = useState(false);
+  const mfa = useMfa({
+    onFinalize: (user) => setSession({ userId: user.id, email: user.email }),
+  });
 
   const [view, setView] = useState("checkin");
   const [step, setStep] = useState(-1);
@@ -674,34 +169,6 @@ export default function CleraShieldCheckIn() {
     })();
   }, [session]);
 
-  function finalizeSession(user) {
-    setSession({ userId: user.id, email: user.email });
-    setMfaStage(null);
-    setPendingUser(null);
-    setMfaPendingToken(null);
-    setMfaFactorId(null);
-    setMfaChallengeId(null);
-    setMfaQrSvg("");
-    setMfaSecret("");
-    setMfaCode("");
-    setMfaError("");
-    setMfaLoading(false);
-  }
-
-  function handlePostPrimaryAuth(data) {
-    if (data.status === "mfa_required") {
-      setMfaPendingToken(data.pendingToken);
-      setMfaFactorId(data.factorId);
-      setMfaStage("challenge");
-      return;
-    }
-    // status === 'authenticated': cookies are already live. The server only
-    // takes this branch when there's no verified factor, so this is always
-    // either a brand-new account or one that never enrolled — offer setup.
-    setPendingUser(data.user);
-    setMfaStage("offer");
-  }
-
   async function handleAuthSubmit(e) {
     e.preventDefault();
     setAuthError("");
@@ -720,7 +187,7 @@ export default function CleraShieldCheckIn() {
       } else {
         data = await signInRequest(authEmail, authPassword);
       }
-      handlePostPrimaryAuth(data);
+      mfa.handlePostPrimaryAuth(data);
     } catch (err) {
       setAuthError(err.message || "Something went wrong. Please try again.");
     } finally {
@@ -765,79 +232,11 @@ export default function CleraShieldCheckIn() {
       setNewPasswordConfirm("");
       setRecoveryAccessToken(null);
       setRecoveryRefreshToken(null);
-      handlePostPrimaryAuth(data);
+      mfa.handlePostPrimaryAuth(data);
     } catch (err) {
       setAuthError(err.message || "That reset link has expired or was already used. Request a new one.");
     } finally {
       setAuthLoading(false);
-    }
-  }
-
-  function cancelMfa() {
-    if (mfaStage === "setup" && mfaFactorId) {
-      unenrollFactor(mfaFactorId);
-    }
-    if (mfaStage === "offer" || mfaStage === "setup") {
-      // A cookie session already exists for this path (there was no factor
-      // to gate on) — cancelling means aborting the whole sign-in, not just
-      // the MFA prompt, so fully sign out.
-      logoutRequest();
-    }
-    // 'challenge' stage: no cookie was ever set for the pending token —
-    // nothing to revoke, it just expires unused within the hour.
-    setMfaStage(null);
-    setPendingUser(null);
-    setMfaPendingToken(null);
-    setMfaFactorId(null);
-    setMfaChallengeId(null);
-    setMfaQrSvg("");
-    setMfaSecret("");
-    setMfaCode("");
-    setMfaError("");
-  }
-
-  function skipMfaSetup() {
-    if (pendingUser) finalizeSession(pendingUser);
-  }
-
-  async function startMfaSetup() {
-    setMfaError("");
-    setMfaLoading(true);
-    try {
-      const enrolled = await enrollTotpFactor();
-      setMfaFactorId(enrolled.id);
-      setMfaQrSvg((enrolled.totp && enrolled.totp.qr_code) || "");
-      setMfaSecret((enrolled.totp && enrolled.totp.secret) || "");
-      setMfaStage("setup");
-    } catch (e) {
-      setMfaError(e.message || "Could not start two-factor setup.");
-    } finally {
-      setMfaLoading(false);
-    }
-  }
-
-  async function submitMfaSetupCode() {
-    setMfaError("");
-    setMfaLoading(true);
-    try {
-      const verified = await verifyMfaChallenge(mfaFactorId, mfaCode);
-      finalizeSession(verified.user);
-    } catch (e) {
-      setMfaError(e.message || "That code didn't match. Try again.");
-      setMfaLoading(false);
-    }
-  }
-
-  async function submitMfaChallengeCode() {
-    setMfaError("");
-    setMfaLoading(true);
-    try {
-      const verified = await verifyMfaChallenge(mfaFactorId, mfaCode, mfaPendingToken);
-      finalizeSession(verified.user);
-    } catch (e) {
-      setMfaError(e.message || "That code didn't match. Try again.");
-      setMfaCode("");
-      setMfaLoading(false);
     }
   }
 
@@ -857,25 +256,8 @@ export default function CleraShieldCheckIn() {
     setNewPasswordConfirm("");
     setCompletionCounts({});
     closeIntervention();
-    setMfaStage(null);
-    setPendingUser(null);
-    setMfaPendingToken(null);
-    setMfaFactorId(null);
-    setMfaChallengeId(null);
-    setMfaQrSvg("");
-    setMfaSecret("");
-    setMfaCode("");
-    setMfaError("");
+    mfa.resetMfaState();
   }
-
-  const NAV_ITEMS = [
-    { id: "overview", label: "Overview" },
-    { id: "why-it-matters", label: "Why It Matters" },
-    { id: "how-it-works", label: "How It Works" },
-    { id: "privacy-security", label: "Privacy & Security" },
-    { id: "who-its-for", label: "Who It's For" },
-    { id: "signin", label: "Sign In" },
-  ];
 
   function handleNavClick(id) {
     if (id === "signin") {
@@ -974,8 +356,8 @@ export default function CleraShieldCheckIn() {
     setBreathingCycles(0);
   }
 
-  function advanceIntervention(totalSteps) {
-    if (interventionStepIndex + 1 >= totalSteps) {
+  function advanceIntervention(totalIvSteps) {
+    if (interventionStepIndex + 1 >= totalIvSteps) {
       completeIntervention();
       closeIntervention();
     } else {
@@ -993,6 +375,11 @@ export default function CleraShieldCheckIn() {
         /* non-critical, completion still shown locally */
       }
     }
+  }
+
+  function openSuggestedIntervention(id) {
+    setView("interventions");
+    openIntervention(id);
   }
 
   const dateStr = clock.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
@@ -1078,408 +465,7 @@ export default function CleraShieldCheckIn() {
 
   return (
     <div className="cs-root">
-      <style>{`
-        *, *::before, *::after { box-sizing: border-box; }
-        html, body { overflow-x: hidden; margin: 0; padding: 0; background: #0A0D12; }
-        #root { min-height: 100vh; background: #0A0D12; }
-        .cs-root {
-          --bg: #0A0D12;
-          --panel: #12161D;
-          --panel-border: #232B35;
-          --text-primary: #EDEFF2;
-          --text-muted: #7E8896;
-          --sig-green: #3FB871;
-          --sig-yellow: #E8B93F;
-          --sig-amber: #E8833F;
-          --sig-red: #D6484A;
-          min-height: 100vh;
-          width: 100%;
-          background: var(--bg);
-          background-image: radial-gradient(circle at 50% 0%, rgba(232,179,63,0.05), transparent 55%);
-          color: var(--text-primary);
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-          display: flex;
-          justify-content: center;
-          padding: max(32px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
-        }
-        .cs-shell { width: 100%; max-width: 420px; display: flex; flex-direction: column; min-height: 640px; transition: max-width 200ms ease; }
-        @media (min-width: 640px) {
-          .cs-shell { max-width: 480px; }
-          .cs-h1 { font-size: 31.5px; }
-          .cs-card { padding: 34px 30px; }
-        }
-        @media (min-width: 768px) {
-          .cs-shell { max-width: 500px; }
-          .cs-shell-home { max-width: 640px; }
-        }
-        @media (min-width: 1024px) {
-          .cs-root { align-items: center; }
-          .cs-shell { max-width: 520px; }
-          .cs-shell-home { max-width: 760px; }
-          .cs-card { padding: 40px 36px; }
-          .cs-pct { font-size: 45px; }
-        }
-        @media (min-width: 1280px) {
-          .cs-shell-home { max-width: 860px; }
-        }
-        .cs-topbar { display: flex; align-items: baseline; justify-content: space-between; padding-bottom: 18px; border-bottom: 1px solid var(--panel-border); margin-bottom: 20px; }
-        .cs-wordmark { font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif; font-weight: 600; font-size: 17px; letter-spacing: 0.14em; color: var(--text-primary); }
-        .cs-wordmark span { color: var(--sig-amber); }
-        .cs-clock { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; color: var(--text-muted); letter-spacing: 0.03em; text-align: right; }
-        .cs-signout {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-          font-size: 13.5px;
-          letter-spacing: 0.06em;
-          color: var(--text-muted);
-          background: #171C24;
-          border: 1px solid var(--panel-border);
-          border-radius: 3px;
-          cursor: pointer;
-          padding: 7px 12px;
-          margin-top: 8px;
-        }
-        .cs-signout:hover { color: var(--text-primary); border-color: var(--text-muted); }
-        .cs-tabs { display: flex; gap: 8px; margin-bottom: 20px; }
-        .cs-tab { flex: 1; text-align: center; padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; letter-spacing: 0.1em; border: 1px solid var(--panel-border); border-radius: 3px; background: transparent; color: var(--text-muted); cursor: pointer; }
-        .cs-tab.active { border-color: var(--sig-amber); color: var(--text-primary); background: #171C24; }
-        .cs-progress { display: flex; gap: 6px; margin-bottom: 28px; }
-        .cs-seg { flex: 1; height: 4px; border-radius: 2px; background: var(--panel-border); overflow: hidden; }
-        .cs-seg-fill { height: 100%; width: 0%; background: var(--sig-amber); transition: width 300ms ease; }
-        .cs-seg-fill.filled { width: 100%; }
-        .cs-body { flex: 1; display: flex; flex-direction: column; }
-        .cs-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 4px; padding: 28px 24px; flex: 1; display: flex; flex-direction: column; }
-        .cs-card-compact { flex: 0 0 auto; }
-        .cs-card-compact .cs-begin-btn { margin-top: 10px; }
-        .cs-eyebrow { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; letter-spacing: 0.18em; color: var(--sig-amber); margin-bottom: 14px; }
-        .cs-h1 { font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif; font-weight: 500; font-size: 29px; line-height: 1.25; margin: 0 0 8px 0; color: var(--text-primary); }
-        .cs-sub { color: var(--text-muted); font-size: 15.5px; line-height: 1.5; margin: 0 0 28px 0; }
-        .cs-options { display: flex; flex-direction: column; gap: 10px; }
-        .cs-opt { text-align: left; background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 16px 18px; color: var(--text-primary); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; cursor: pointer; display: flex; flex-direction: column; gap: 2px; transition: border-color 150ms, background 150ms, transform 100ms; }
-        .cs-opt:hover { border-color: var(--sig-amber); background: #1C222C; }
-        .cs-opt:active { transform: scale(0.99); }
-        .cs-opt-label { font-size: 17px; font-weight: 600; }
-        .cs-opt-sub { font-size: 14px; color: var(--text-muted); }
-        .cs-begin-btn { margin-top: auto; background: var(--sig-amber); color: #14100A; border: none; border-radius: 3px; padding: 16px; font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif; font-weight: 600; font-size: 15.5px; letter-spacing: 0.08em; cursor: pointer; }
-        .cs-begin-btn:hover { filter: brightness(1.05); }
-        .cs-begin-btn:disabled { opacity: 0.6; cursor: default; }
-        .cs-secondary-btn { margin-top: 12px; background: transparent; color: var(--text-muted); border: 1px solid var(--panel-border); border-radius: 3px; padding: 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14.5px; cursor: pointer; }
-        .cs-secondary-btn:hover { color: var(--text-primary); border-color: var(--text-muted); }
-        .gauge-wrap { display: flex; justify-content: center; margin: 6px 0 4px 0; }
-        .gauge-svg { width: 100%; max-width: 280px; }
-        .cs-readout { text-align: center; margin-top: -46px; margin-bottom: 18px; }
-        .cs-pct { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 38px; font-weight: 600; line-height: 1; }
-        .cs-pct-label { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--text-muted); letter-spacing: 0.14em; margin-top: 4px; }
-        .cs-condition-badge { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13.5px; letter-spacing: 0.12em; padding: 6px 12px; border-radius: 2px; display: inline-block; margin-bottom: 16px; border: 1px solid currentColor; }
-        .cs-incident-banner { display: flex; align-items: center; gap: 10px; background: rgba(214, 72, 74, 0.1); border: 1px solid var(--sig-red); border-radius: 3px; padding: 12px 14px; margin-bottom: 20px; }
-        .cs-incident-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--sig-red); flex-shrink: 0; }
-        .cs-incident-text { font-size: 14px; line-height: 1.4; }
-        .cs-incident-text b { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; letter-spacing: 0.08em; color: var(--sig-red); margin-bottom: 2px; }
-        .cs-breakdown { display: flex; flex-direction: column; gap: 8px; margin: 18px 0; padding-top: 18px; border-top: 1px solid var(--panel-border); }
-        .cs-breakdown-row { display: flex; justify-content: space-between; font-size: 14px; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-        .cs-breakdown-row b { color: var(--text-primary); font-weight: 500; }
-        .cs-footer-note { font-size: 12.5px; color: var(--text-muted); text-align: center; margin-top: 18px; line-height: 1.5; }
-        .cs-streak-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
-        .cs-streak-num { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 31.5px; font-weight: 600; color: var(--sig-amber); line-height: 1; }
-        .cs-streak-label { font-size: 11px; color: var(--text-muted); letter-spacing: 0.1em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-top: 4px; }
-        .cs-day-chips { display: flex; gap: 6px; }
-        .cs-day-chip { width: 24px; height: 24px; border-radius: 3px; border: 1px solid var(--panel-border); }
-        .cs-chart-wrap { height: 170px; margin: 4px -6px 22px -6px; }
-        .cs-trend-pulse-ring {
-          transform-box: fill-box;
-          transform-origin: center;
-          opacity: 0.55;
-          animation: cs-trend-pulse 2.2s ease-out infinite;
-        }
-        @keyframes cs-trend-pulse {
-          0% { transform: scale(1); opacity: 0.55; }
-          70% { transform: scale(3.2); opacity: 0; }
-          100% { transform: scale(3.2); opacity: 0; }
-        }
-        .cs-condition-dist { display: flex; gap: 8px; margin-bottom: 16px; }
-        .cs-dist-chip { flex: 1; text-align: center; padding: 10px 4px; border-radius: 3px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; letter-spacing: 0.04em; border: 1px solid currentColor; }
-        .cs-stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
-        .cs-stat-card { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 6px; text-align: center; }
-        .cs-stat-value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; font-weight: 600; }
-        .cs-stat-tier { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; margin-top: 2px; }
-        .cs-stat-label { font-size: 10.5px; color: var(--text-muted); letter-spacing: 0.06em; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-        .cs-lock-badge {
-          position: absolute;
-          top: 18px;
-          right: 18px;
-          display: flex;
-          align-items: center;
-          gap: 7px;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-          font-size: 13.5px;
-          padding: 6px 11px;
-          border-radius: 20px;
-          border: 1px solid currentColor;
-          background: #171C24;
-          transition: color 1s linear, border-color 1s linear;
-        }
-        .cs-lock-dot { width: 8px; height: 8px; border-radius: 50%; transition: background 1s linear; }
-
-        .cs-breathe-wrap { display: flex; flex-direction: column; align-items: center; margin: 28px 0; }
-        .cs-breathe-circle {
-          width: 140px;
-          height: 140px;
-          border-radius: 50%;
-          background: radial-gradient(circle, rgba(232,131,63,0.35), rgba(232,131,63,0.08));
-          border: 2px solid var(--sig-amber);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-          font-size: 14px;
-          letter-spacing: 0.1em;
-          color: var(--text-primary);
-          transition-property: transform;
-          transition-timing-function: ease-in-out;
-        }
-        .cs-breathe-cycles { margin-top: 18px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; color: var(--text-muted); letter-spacing: 0.06em; }
-
-        .cs-domain-group {
-          margin-top: 14px;
-          border: 1px solid var(--panel-border);
-          border-radius: 3px;
-          overflow: hidden;
-        }
-        .cs-domain-header {
-          width: 100%;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          background: #171C24;
-          border: none;
-          padding: 14px 16px;
-          cursor: pointer;
-          text-align: left;
-        }
-        .cs-domain-header:hover { background: #1C222C; }
-        .cs-domain-label {
-          font-family: 'Oswald', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-          font-weight: 600;
-          font-size: 15.5px;
-          letter-spacing: 0.06em;
-          color: var(--text-primary);
-        }
-        .cs-domain-full {
-          font-size: 12px;
-          color: var(--text-muted);
-          margin-top: 2px;
-        }
-        .cs-domain-caret {
-          color: var(--sig-amber);
-          font-size: 14px;
-          transition: transform 200ms ease;
-          transform: rotate(-90deg);
-          flex-shrink: 0;
-        }
-        .cs-domain-caret.open { transform: rotate(0deg); }
-        .cs-domain-body { padding: 14px; background: var(--panel); }
-        .cs-domain-body .cs-intervention-card:last-child { margin-bottom: 0; }
-        .cs-intervention-card {
-          width: 100%;
-          text-align: left;
-          background: #171C24;
-          border: 1px solid var(--panel-border);
-          border-radius: 3px;
-          padding: 14px 16px;
-          margin-bottom: 10px;
-          cursor: pointer;
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-        }
-        .cs-intervention-card:hover { border-color: var(--sig-amber); }
-        .cs-intervention-card-top { display: flex; justify-content: space-between; align-items: baseline; }
-        .cs-intervention-title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-weight: 600; font-size: 15.5px; color: var(--text-primary); }
-        .cs-intervention-duration { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--text-muted); }
-        .cs-intervention-blurb { font-size: 13.5px; color: var(--text-muted); line-height: 1.4; }
-        .cs-intervention-modality { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--sig-amber); letter-spacing: 0.04em; margin-top: 2px; }
-
-        .cs-intervention-step-text {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-          font-size: 17px;
-          line-height: 1.6;
-          color: var(--text-primary);
-          margin: 0 0 28px 0;
-        }
-
-        .cs-suggestion-box {
-          background: #171C24;
-          border: 1px solid var(--panel-border);
-          border-radius: 3px;
-          padding: 14px 16px;
-          margin-bottom: 20px;
-        }
-        .cs-suggestion-label {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-          font-size: 11px;
-          letter-spacing: 0.1em;
-          color: var(--sig-amber);
-          margin-bottom: 10px;
-        }
-        .cs-suggestion-item {
-          width: 100%;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          background: transparent;
-          border: none;
-          border-top: 1px solid var(--panel-border);
-          padding: 10px 0;
-          cursor: pointer;
-          color: var(--text-primary);
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-          font-size: 14.5px;
-          font-weight: 600;
-        }
-        .cs-suggestion-item:first-of-type { border-top: none; }
-        .cs-suggestion-duration { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--text-muted); font-weight: 400; }
-        .cs-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
-        .cs-field label { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; letter-spacing: 0.08em; color: var(--text-muted); }
-        .cs-field-hint { font-size: 11.5px; color: var(--text-muted); margin-top: 4px; }
-        .cs-mfa-qr {
-          background: #FFFFFF;
-          border-radius: 4px;
-          padding: 16px;
-          display: flex;
-          justify-content: center;
-          margin: 8px 0 16px 0;
-        }
-        .cs-mfa-qr img { width: 100%; max-width: 200px; height: auto; display: block; }
-        .cs-mfa-secret {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-          font-size: 12.5px;
-          color: var(--text-muted);
-          text-align: center;
-          line-height: 1.6;
-          margin-bottom: 20px;
-          word-break: break-all;
-        }
-        .cs-mfa-secret b { color: var(--text-primary); letter-spacing: 0.04em; }
-        .cs-field input, .cs-field select { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 14px; color: var(--text-primary); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15.5px; }
-        .cs-field input:focus, .cs-field select:focus { outline: none; border-color: var(--sig-amber); }
-        .cs-full-width { width: 100%; }
-
-        .cs-hamburger {
-          width: 34px;
-          height: 34px;
-          background: #171C24;
-          border: 1px solid var(--panel-border);
-          border-radius: 3px;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          gap: 4px;
-          cursor: pointer;
-        }
-        .cs-hamburger span { width: 16px; height: 2px; background: var(--text-primary); border-radius: 1px; }
-
-        .cs-nav-menu {
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-          background: var(--panel);
-          border: 1px solid var(--panel-border);
-          border-radius: 4px;
-          padding: 10px;
-          margin-bottom: 20px;
-        }
-        .cs-nav-item {
-          text-align: left;
-          background: transparent;
-          border: none;
-          color: var(--text-primary);
-          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-          font-size: 13px;
-          letter-spacing: 0.04em;
-          padding: 12px 10px;
-          border-radius: 3px;
-          cursor: pointer;
-        }
-        .cs-nav-item:hover { background: #1C222C; color: var(--sig-amber); }
-
-        .cs-home { display: flex; flex-direction: column; gap: 0; }
-        .cs-home-section {
-          padding: 30px 0;
-          border-bottom: 1px solid var(--panel-border);
-        }
-        .cs-home-section:last-child { border-bottom: none; }
-        .cs-home-hero { padding-top: 8px; }
-        .cs-home-h1 {
-          font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
-          font-weight: 500;
-          font-size: 32px;
-          line-height: 1.2;
-          margin: 0 0 16px 0;
-          color: var(--text-primary);
-        }
-        .cs-home-h2 {
-          font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
-          font-weight: 500;
-          font-size: 22px;
-          line-height: 1.3;
-          margin: 0 0 14px 0;
-          color: var(--text-primary);
-        }
-        .cs-home-p {
-          color: var(--text-muted);
-          font-size: 15.5px;
-          line-height: 1.65;
-          margin: 0;
-          max-width: 640px;
-        }
-        .cs-home-closing { text-align: center; }
-        .cs-home-closing .cs-home-h2 { font-size: 20px; margin-bottom: 20px; }
-        .cs-home-cta { display: flex; flex-direction: column; gap: 12px; margin-top: 32px; }
-        .cs-cta-primary {
-          background: var(--sig-amber);
-          color: #14100A;
-          border: none;
-          border-radius: 3px;
-          padding: 16px;
-          font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
-          font-weight: 600;
-          font-size: 15.5px;
-          letter-spacing: 0.08em;
-          cursor: pointer;
-        }
-        .cs-cta-primary:hover { filter: brightness(1.05); }
-        .cs-cta-secondary {
-          background: transparent;
-          color: var(--text-primary);
-          border: 1px solid var(--panel-border);
-          border-radius: 3px;
-          padding: 16px;
-          font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
-          font-weight: 600;
-          font-size: 15.5px;
-          letter-spacing: 0.08em;
-          cursor: pointer;
-        }
-        .cs-cta-secondary:hover { border-color: var(--sig-amber); color: var(--sig-amber); }
-        @media (min-width: 640px) {
-          .cs-home-h1 { font-size: 38px; }
-          .cs-home-h2 { font-size: 25px; }
-        }
-        @media (min-width: 768px) {
-          .cs-home-section { padding: 40px 0; }
-          .cs-home-p { font-size: 16.5px; }
-          .cs-home-hero { text-align: left; max-width: 640px; margin-left: auto; margin-right: auto; }
-        }
-        @media (min-width: 1024px) {
-          .cs-home-h1 { font-size: 44px; }
-          .cs-home-h2 { font-size: 27px; }
-          .cs-home-section { padding: 48px 0; }
-        }
-        .cs-auth-error { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; color: var(--sig-red); margin-bottom: 14px; line-height: 1.5; }
-        .cs-auth-notice { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; color: var(--sig-green); margin-bottom: 14px; line-height: 1.5; }
-        .cs-auth-toggle { text-align: center; margin-top: 14px; font-size: 14px; color: var(--text-muted); }
-        .cs-auth-toggle button { background: none; border: none; color: var(--sig-amber); cursor: pointer; font-size: 14px; text-decoration: underline; padding: 0; }
-      `}</style>
+      <style>{CS_STYLES}</style>
 
       <div className={`cs-shell ${!session && page === "home" ? "cs-shell-home" : ""}`}>
         <div className="cs-topbar">
@@ -1547,279 +533,29 @@ export default function CleraShieldCheckIn() {
         )}
 
         {!session && page === "auth" && (
-          <div className="cs-body">
-            {!mfaStage && (authMode === "signin" || authMode === "signup") && (
-              <div className="cs-card">
-                <h1 className="cs-h1">
-                  {authMode === "signin" ? "Welcome back." : "Set up your account."}
-                </h1>
-                <p className="cs-sub">
-                  Your responses are protected with industry standard security, ensuring that
-                  only you have access to your personal check-in history.
-                </p>
-
-                {authError && <div className="cs-auth-error">{authError}</div>}
-                {authNotice && <div className="cs-auth-notice">{authNotice}</div>}
-
-                <form onSubmit={handleAuthSubmit}>
-                  <div className="cs-field">
-                    <label>EMAIL</label>
-                    <input
-                      type="email"
-                      required
-                      value={authEmail}
-                      onChange={(e) => setAuthEmail(e.target.value)}
-                      autoComplete="email"
-                    />
-                  </div>
-                  <div className="cs-field">
-                    <label>PASSWORD</label>
-                    <input
-                      type="password"
-                      required
-                      minLength={12}
-                      value={authPassword}
-                      onChange={(e) => setAuthPassword(e.target.value)}
-                      autoComplete={authMode === "signin" ? "current-password" : "new-password"}
-                    />
-                    {authMode === "signup" && (
-                      <div className="cs-field-hint">At least 12 characters.</div>
-                    )}
-                  </div>
-                  {authMode === "signup" && (
-                    <div className="cs-field">
-                      <label>ROLE</label>
-                      <select value={authRole} onChange={(e) => setAuthRole(e.target.value)} required>
-                        <option value="" disabled>
-                          Choose your Role
-                        </option>
-                        {ROLE_OPTIONS.map((r) => (
-                          <option key={r} value={r}>
-                            {r}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                  <button className="cs-begin-btn cs-full-width" type="submit" disabled={authLoading}>
-                    {authLoading ? "WORKING…" : authMode === "signin" ? "SIGN IN" : "CREATE ACCOUNT"}
-                  </button>
-                </form>
-
-                {authMode === "signin" && (
-                  <div className="cs-auth-toggle">
-                    <button
-                      onClick={() => {
-                        setAuthMode("reset-request");
-                        setAuthError("");
-                        setAuthNotice("");
-                      }}
-                    >
-                      Forgot password?
-                    </button>
-                  </div>
-                )}
-
-                <div className="cs-auth-toggle">
-                  {authMode === "signin" ? (
-                    <>
-                      Need an account?{" "}
-                      <button onClick={() => { setAuthMode("signup"); setAuthError(""); setAuthNotice(""); }}>
-                        Sign up
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      Already have one?{" "}
-                      <button onClick={() => { setAuthMode("signin"); setAuthError(""); setAuthNotice(""); }}>
-                        Sign in
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {!mfaStage && authMode === "reset-request" && (
-              <div className="cs-card">
-                <h1 className="cs-h1">Reset your password.</h1>
-                <p className="cs-sub">
-                  Enter the email on your account and we'll send you a link to set a new
-                  password.
-                </p>
-
-                {authError && <div className="cs-auth-error">{authError}</div>}
-                {authNotice && <div className="cs-auth-notice">{authNotice}</div>}
-
-                <form onSubmit={handleRequestReset}>
-                  <div className="cs-field">
-                    <label>EMAIL</label>
-                    <input
-                      type="email"
-                      required
-                      value={authEmail}
-                      onChange={(e) => setAuthEmail(e.target.value)}
-                      autoComplete="email"
-                    />
-                  </div>
-                  <button className="cs-begin-btn cs-full-width" type="submit" disabled={authLoading}>
-                    {authLoading ? "SENDING…" : "SEND RESET LINK"}
-                  </button>
-                </form>
-
-                <div className="cs-auth-toggle">
-                  <button
-                    onClick={() => {
-                      setAuthMode("signin");
-                      setAuthError("");
-                      setAuthNotice("");
-                    }}
-                  >
-                    Back to sign in
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {!mfaStage && authMode === "reset-confirm" && (
-              <div className="cs-card">
-                <h1 className="cs-h1">Set a new password.</h1>
-                <p className="cs-sub">Choose a new password for your account.</p>
-
-                {authError && <div className="cs-auth-error">{authError}</div>}
-
-                <form onSubmit={handleConfirmReset}>
-                  <div className="cs-field">
-                    <label>NEW PASSWORD</label>
-                    <input
-                      type="password"
-                      required
-                      minLength={12}
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                      autoComplete="new-password"
-                    />
-                    <div className="cs-field-hint">At least 12 characters.</div>
-                  </div>
-                  <div className="cs-field">
-                    <label>CONFIRM NEW PASSWORD</label>
-                    <input
-                      type="password"
-                      required
-                      minLength={12}
-                      value={newPasswordConfirm}
-                      onChange={(e) => setNewPasswordConfirm(e.target.value)}
-                      autoComplete="new-password"
-                    />
-                  </div>
-                  <button className="cs-begin-btn cs-full-width" type="submit" disabled={authLoading}>
-                    {authLoading ? "WORKING…" : "SET NEW PASSWORD"}
-                  </button>
-                </form>
-              </div>
-            )}
-
-            {mfaStage === "offer" && (
-              <div className="cs-card">
-                <div className="cs-eyebrow">TWO-FACTOR AUTHENTICATION</div>
-                <h1 className="cs-h1">Add an extra layer of security?</h1>
-                <p className="cs-sub">
-                  With two-factor authentication on, signing in also requires a code from an
-                  authenticator app on your phone — so a leaked password alone isn't enough
-                  to get into your account.
-                </p>
-                {mfaError && <div className="cs-auth-error">{mfaError}</div>}
-                <button className="cs-begin-btn cs-full-width" onClick={startMfaSetup} disabled={mfaLoading}>
-                  {mfaLoading ? "WORKING…" : "SET UP NOW"}
-                </button>
-                <button className="cs-secondary-btn" onClick={skipMfaSetup} disabled={mfaLoading}>
-                  Skip for now
-                </button>
-              </div>
-            )}
-
-            {mfaStage === "setup" && (
-              <div className="cs-card">
-                <div className="cs-eyebrow">TWO-FACTOR AUTHENTICATION</div>
-                <h1 className="cs-h1">Scan this with an authenticator app.</h1>
-                <p className="cs-sub">
-                  Use Google Authenticator, Authy, 1Password, or similar. Then enter the
-                  6-digit code it shows below.
-                </p>
-                {mfaQrSvg && (
-                  <div className="cs-mfa-qr">
-                    <img src={qrCodeToImageSrc(mfaQrSvg)} alt="Two-factor authentication QR code" />
-                  </div>
-                )}
-                {mfaSecret && (
-                  <div className="cs-mfa-secret">
-                    Can't scan it? Enter this code manually:
-                    <br />
-                    <b>{mfaSecret}</b>
-                  </div>
-                )}
-                {mfaError && <div className="cs-auth-error">{mfaError}</div>}
-                <div className="cs-field">
-                  <label>6-DIGIT CODE</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
-                    value={mfaCode}
-                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
-                  />
-                </div>
-                <button
-                  className="cs-begin-btn cs-full-width"
-                  onClick={submitMfaSetupCode}
-                  disabled={mfaLoading || mfaCode.length !== 6}
-                >
-                  {mfaLoading ? "VERIFYING…" : "ENABLE"}
-                </button>
-                <button className="cs-secondary-btn" onClick={cancelMfa} disabled={mfaLoading}>
-                  Cancel
-                </button>
-              </div>
-            )}
-
-            {mfaStage === "challenge" && (
-              <div className="cs-card">
-                <div className="cs-eyebrow">TWO-FACTOR AUTHENTICATION</div>
-                <h1 className="cs-h1">Enter your verification code.</h1>
-                <p className="cs-sub">
-                  Open your authenticator app and enter the 6-digit code for Cleras Shield.
-                </p>
-                {mfaError && <div className="cs-auth-error">{mfaError}</div>}
-                <div className="cs-field">
-                  <label>6-DIGIT CODE</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
-                    value={mfaCode}
-                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
-                    autoFocus
-                  />
-                </div>
-                <button
-                  className="cs-begin-btn cs-full-width"
-                  onClick={submitMfaChallengeCode}
-                  disabled={mfaLoading || mfaCode.length !== 6}
-                >
-                  {mfaLoading ? "VERIFYING…" : "VERIFY"}
-                </button>
-                <button className="cs-secondary-btn" onClick={cancelMfa} disabled={mfaLoading}>
-                  Use a different account
-                </button>
-              </div>
-            )}
-
-            <div className="cs-footer-note">
-              Cleras Shield · Operational Readiness Platform · Confidential to you
-            </div>
-          </div>
+          <Auth
+            mfa={mfa}
+            authMode={authMode}
+            setAuthMode={setAuthMode}
+            authEmail={authEmail}
+            setAuthEmail={setAuthEmail}
+            authPassword={authPassword}
+            setAuthPassword={setAuthPassword}
+            authRole={authRole}
+            setAuthRole={setAuthRole}
+            authError={authError}
+            setAuthError={setAuthError}
+            authNotice={authNotice}
+            setAuthNotice={setAuthNotice}
+            authLoading={authLoading}
+            newPassword={newPassword}
+            setNewPassword={setNewPassword}
+            newPasswordConfirm={newPasswordConfirm}
+            setNewPasswordConfirm={setNewPasswordConfirm}
+            handleAuthSubmit={handleAuthSubmit}
+            handleRequestReset={handleRequestReset}
+            handleConfirmReset={handleConfirmReset}
+          />
         )}
 
         {session && (
@@ -1865,382 +601,58 @@ export default function CleraShieldCheckIn() {
                 </div>
               )}
 
-              {view === "checkin" && step === -1 && isCheckInLocked && (
-                <div className="cs-card cs-card-compact" style={{ position: "relative" }}>
-                  <div
-                    className="cs-lock-badge"
-                    style={{ borderColor: lockColor, color: lockColor }}
-                  >
-                    <span className="cs-lock-dot" style={{ background: lockColor }} />
-                    {formatCountdown(lockRemainingMs)}
-                  </div>
-                  <div className="cs-eyebrow">CHECK-IN COMPLETE</div>
-                  <h1 className="cs-h1">You're set for today.</h1>
-                  <p className="cs-sub">
-                    Your next check-in unlocks in the countdown above. Head to Trends to see
-                    how today compares.
-                  </p>
-                  {lastCondition && (
-                    <div className="cs-condition-badge" style={{ color: lastCondition.color }}>
-                      {lastCondition.code} · {lastCheckIn.pct}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {view === "checkin" && step === -1 && !isCheckInLocked && (
-                <div className="cs-card cs-card-compact">
-                  <div className="cs-eyebrow">DAILY READINESS CHECK-IN</div>
-                  <h1 className="cs-h1">Sixty seconds before shift.</h1>
-                  <p className="cs-sub">
-                    Four quick questions about sleep, stress, critical incidents, and recovery
-                    create your personal readiness signal. It's an easy way to recognize when
-                    something may be shifting before it affects your health, performance, or
-                    relationships. Your individual responses remain private and under your
-                    control.
-                  </p>
-                  <button className="cs-begin-btn" onClick={() => setStep(0)}>
-                    BEGIN CHECK-IN
-                  </button>
-                </div>
-              )}
-
-              {isQuestion && currentQ && (
-                <div className="cs-card">
-                  <div className="cs-eyebrow">{currentQ.label} · {step + 1} OF {totalSteps}</div>
-                  <h1 className="cs-h1">{currentQ.prompt}</h1>
-                  <div className="cs-options">
-                    {currentQ.options.map((opt) => (
-                      <button key={opt.label} className="cs-opt" onClick={() => selectOption(currentQ, opt)}>
-                        <span className="cs-opt-label">{opt.label}</span>
-                        <span className="cs-opt-sub">{opt.sub}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {isResult && condition && (
-                <div className="cs-card">
-                  <div className="cs-eyebrow">READINESS SIGNAL</div>
-
-                  {incidentFlag && (
-                    <div className="cs-incident-banner">
-                      <div className="cs-incident-dot" />
-                      <div className="cs-incident-text">
-                        <b>RECENT CRITICAL INCIDENT</b>
-                        Effects can surface after the score looks fine. Consider a peer
-                        support check-in regardless of today's reading.
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="gauge-wrap">
-                    <Gauge pct={pct} color={condition.color} />
-                  </div>
-                  <div className="cs-readout">
-                    <div className="cs-pct" style={{ color: condition.color }}>
-                      {pct}
-                    </div>
-                    <div className="cs-pct-label">READINESS INDEX</div>
-                  </div>
-
-                  <div style={{ textAlign: "center" }}>
-                    <div className="cs-condition-badge" style={{ color: condition.color }}>
-                      {condition.code}
-                    </div>
-                  </div>
-
-                  <h1 className="cs-h1" style={{ textAlign: "center" }}>
-                    {condition.headline}
-                  </h1>
-                  <p className="cs-sub" style={{ textAlign: "center" }}>
-                    {condition.note}
-                  </p>
-
-                  <div className="cs-breakdown">
-                    <div className="cs-breakdown-row">
-                      <span>SLEEP</span>
-                      <b style={{ color: tierOf(values.sleep ?? 0).color }}>
-                        {tierOf(values.sleep ?? 0).label}
-                      </b>
-                    </div>
-                    <div className="cs-breakdown-row">
-                      <span>STRESS</span>
-                      <b style={{ color: tierOf(values.stress ?? 0, true).color }}>
-                        {tierOf(values.stress ?? 0, true).label}
-                      </b>
-                    </div>
-                    <div className="cs-breakdown-row">
-                      <span>RECOVERY</span>
-                      <b style={{ color: tierOf(values.recovery ?? 0).color }}>
-                        {tierOf(values.recovery ?? 0).label}
-                      </b>
-                    </div>
-                    <div className="cs-breakdown-row">
-                      <span>INCIDENT</span>
-                      <b>{incidentLabel ?? "—"}</b>
-                    </div>
-                  </div>
-
-                  {suggestedInterventionIds(pct, incidentFlag).length > 0 && (
-                    <div className="cs-suggestion-box">
-                      <div className="cs-suggestion-label">WANT A QUICK RESET?</div>
-                      {suggestedInterventionIds(pct, incidentFlag).map((id) => {
-                        const iv = INTERVENTIONS.find((x) => x.id === id);
-                        if (!iv) return null;
-                        return (
-                          <button
-                            key={id}
-                            className="cs-suggestion-item"
-                            onClick={() => {
-                              setView("interventions");
-                              openIntervention(id);
-                            }}
-                          >
-                            <span>{iv.title}</span>
-                            <span className="cs-suggestion-duration">{iv.duration}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  <button className="cs-begin-btn" onClick={finishCheckIn}>
-                    LOG &amp; DONE FOR TODAY
-                  </button>
-                  <button className="cs-secondary-btn" onClick={resetToIntro}>
-                    Retake check-in
-                  </button>
-                </div>
+              {view === "checkin" && (
+                <CheckIn
+                  step={step}
+                  setStep={setStep}
+                  totalSteps={totalSteps}
+                  currentQ={currentQ}
+                  isQuestion={isQuestion}
+                  isResult={isResult}
+                  isCheckInLocked={isCheckInLocked}
+                  lockColor={lockColor}
+                  lockRemainingMs={lockRemainingMs}
+                  lastCondition={lastCondition}
+                  lastCheckIn={lastCheckIn}
+                  condition={condition}
+                  pct={pct}
+                  values={values}
+                  incidentFlag={incidentFlag}
+                  incidentLabel={incidentLabel}
+                  selectOption={selectOption}
+                  resetToIntro={resetToIntro}
+                  finishCheckIn={finishCheckIn}
+                  onOpenSuggestedIntervention={openSuggestedIntervention}
+                />
               )}
 
               {view === "trends" && (
-                <div className="cs-card">
-                  <div className="cs-eyebrow">14-DAY TREND</div>
-
-                  {loadingHistory ? (
-                    <p className="cs-sub">Loading history from Supabase…</p>
-                  ) : present14.length === 0 ? (
-                    <p className="cs-sub">
-                      No check-ins yet. Complete today's check-in to start your trend.
-                    </p>
-                  ) : (
-                    <>
-                      <div className="cs-streak-row">
-                        <div>
-                          <div className="cs-streak-num">{streak}</div>
-                          <div className="cs-streak-label">DAY STREAK</div>
-                        </div>
-                        <div className="cs-day-chips">
-                          {last7.map((d) => (
-                            <div
-                              key={d.key}
-                              className="cs-day-chip"
-                              style={{ background: d.entry ? getCondition(d.entry.pct).hex : "transparent" }}
-                              title={d.key}
-                            />
-                          ))}
-                        </div>
-                      </div>
-
-                      <div className="cs-chart-wrap">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <AreaChart data={chartData} margin={{ top: 6, right: 6, left: -18, bottom: 0 }}>
-                            <defs>
-                              <linearGradient id="csFill" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="0%" stopColor="#E8833F" stopOpacity={0.35} />
-                                <stop offset="100%" stopColor="#E8833F" stopOpacity={0} />
-                              </linearGradient>
-                            </defs>
-                            <CartesianGrid stroke="#232B35" vertical={false} />
-                            <XAxis
-                              dataKey="label"
-                              tick={{ fill: "#7E8896", fontSize: 10, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" }}
-                              axisLine={{ stroke: "#232B35" }}
-                              tickLine={false}
-                              interval={1}
-                            />
-                            <YAxis
-                              domain={[0, 100]}
-                              tick={{ fill: "#7E8896", fontSize: 10, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" }}
-                              axisLine={false}
-                              tickLine={false}
-                              width={26}
-                            />
-                            <Tooltip content={<TrendTooltip />} />
-                            <Area
-                              type="monotone"
-                              dataKey="pct"
-                              stroke="#E8833F"
-                              strokeWidth={2}
-                              fill="url(#csFill)"
-                              dot={<TrendDot />}
-                              connectNulls={false}
-                            />
-                          </AreaChart>
-                        </ResponsiveContainer>
-                      </div>
-
-                      <div className="cs-condition-dist">
-                        <div className="cs-dist-chip" style={{ color: "var(--sig-green)" }}>
-                          HIGH · {dist.green}
-                        </div>
-                        <div className="cs-dist-chip" style={{ color: "var(--sig-amber)" }}>
-                          MODERATE · {dist.amber}
-                        </div>
-                        <div className="cs-dist-chip" style={{ color: "var(--sig-red)" }}>
-                          LOW · {dist.red}
-                        </div>
-                      </div>
-
-                      <div className="cs-stats-grid">
-                        <div className="cs-stat-card" style={{ borderColor: tierOf(avg.sleep).color }}>
-                          <div className="cs-stat-value" style={{ color: tierOf(avg.sleep).color }}>
-                            {avg.sleep}
-                          </div>
-                          <div className="cs-stat-tier" style={{ color: tierOf(avg.sleep).color }}>
-                            {tierOf(avg.sleep).label}
-                          </div>
-                          <div className="cs-stat-label">AVG SLEEP</div>
-                        </div>
-                        <div className="cs-stat-card" style={{ borderColor: tierOf(avg.stress).color }}>
-                          <div className="cs-stat-value" style={{ color: tierOf(avg.stress).color }}>
-                            {100 - avg.stress}
-                          </div>
-                          <div className="cs-stat-tier" style={{ color: tierOf(avg.stress).color }}>
-                            {tierOf(avg.stress, true).label}
-                          </div>
-                          <div className="cs-stat-label">AVG STRESS</div>
-                        </div>
-                        <div className="cs-stat-card" style={{ borderColor: tierOf(avg.recovery).color }}>
-                          <div className="cs-stat-value" style={{ color: tierOf(avg.recovery).color }}>
-                            {avg.recovery}
-                          </div>
-                          <div className="cs-stat-tier" style={{ color: tierOf(avg.recovery).color }}>
-                            {tierOf(avg.recovery).label}
-                          </div>
-                          <div className="cs-stat-label">AVG RECOVERY</div>
-                        </div>
-                      </div>
-
-                      {incidentCount14 > 0 && (
-                        <div className="cs-incident-banner" style={{ marginTop: 18, marginBottom: 0 }}>
-                          <div className="cs-incident-dot" />
-                          <div className="cs-incident-text">
-                            <b>
-                              {incidentCount14} CRITICAL INCIDENT{incidentCount14 > 1 ? "S" : ""} LOGGED
-                            </b>
-                            In the last 14 days.
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
+                <Dashboard
+                  loadingHistory={loadingHistory}
+                  present14={present14}
+                  streak={streak}
+                  last7={last7}
+                  chartData={chartData}
+                  dist={dist}
+                  avg={avg}
+                  incidentCount14={incidentCount14}
+                />
               )}
 
-              {view === "interventions" && !activeInterventionId && (
-                <div className="cs-card">
-                  <div className="cs-eyebrow">CARE PATHWAYS</div>
-                  <h1 className="cs-h1">Interventions</h1>
-                  <p className="cs-sub">
-                    Short, evidence-informed exercises drawn from CBT, DBT, and ACT. Nothing
-                    you do here is saved — only that you did it.
-                  </p>
-                  {INTERVENTION_DOMAINS.map((domain) => {
-                    const isOpen = !!openDomains[domain.id];
-                    const items = INTERVENTIONS.filter((iv) => iv.modalities.includes(domain.id));
-                    return (
-                      <div key={domain.id} className="cs-domain-group">
-                        <button
-                          className="cs-domain-header"
-                          onClick={() => toggleDomain(domain.id)}
-                          aria-expanded={isOpen}
-                        >
-                          <div>
-                            <div className="cs-domain-label">{domain.label}</div>
-                            <div className="cs-domain-full">{domain.full}</div>
-                          </div>
-                          <span className={`cs-domain-caret ${isOpen ? "open" : ""}`}>▾</span>
-                        </button>
-                        {isOpen && (
-                          <div className="cs-domain-body">
-                            {items.map((iv) => (
-                              <button
-                                key={iv.id}
-                                className="cs-intervention-card"
-                                onClick={() => openIntervention(iv.id)}
-                              >
-                                <div className="cs-intervention-card-top">
-                                  <span className="cs-intervention-title">{iv.title}</span>
-                                  <span className="cs-intervention-duration">{iv.duration}</span>
-                                </div>
-                                <div className="cs-intervention-blurb">{iv.blurb}</div>
-                                <div className="cs-intervention-modality">
-                                  {iv.modalities.join(" / ")}
-                                  {completionCounts[iv.id] ? ` · Done ${completionCounts[iv.id]}×` : ""}
-                                </div>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+              {view === "interventions" && (
+                <Interventions
+                  completionCounts={completionCounts}
+                  openDomains={openDomains}
+                  toggleDomain={toggleDomain}
+                  activeInterventionId={activeInterventionId}
+                  interventionStepIndex={interventionStepIndex}
+                  openIntervention={openIntervention}
+                  closeIntervention={closeIntervention}
+                  advanceIntervention={advanceIntervention}
+                  completeIntervention={completeIntervention}
+                  setBreathingCycles={setBreathingCycles}
+                />
               )}
-
-              {view === "interventions" && activeInterventionId && (() => {
-                const iv = INTERVENTIONS.find((x) => x.id === activeInterventionId);
-                if (!iv) return null;
-                const isLast = interventionStepIndex + 1 >= iv.steps.length;
-                return (
-                  <div className="cs-card">
-                    <div className="cs-eyebrow">
-                      {iv.title.toUpperCase()} · {iv.modalities.join(" / ")}
-                    </div>
-                    {iv.type === "breathing" ? (
-                      <>
-                        <p className="cs-sub">{iv.steps[0]}</p>
-                        <BreathingPacer onCycleComplete={(n) => setBreathingCycles(n)} />
-                        <button
-                          className="cs-begin-btn cs-full-width"
-                          onClick={() => {
-                            completeIntervention();
-                            closeIntervention();
-                          }}
-                        >
-                          DONE
-                        </button>
-                        <button className="cs-secondary-btn" onClick={closeIntervention}>
-                          Back to list
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <div className="cs-progress" style={{ marginBottom: 24 }}>
-                          {iv.steps.map((_, i) => (
-                            <div className="cs-seg" key={i}>
-                              <div className={`cs-seg-fill ${i < interventionStepIndex ? "filled" : ""}`} />
-                            </div>
-                          ))}
-                        </div>
-                        <p className="cs-intervention-step-text">{iv.steps[interventionStepIndex]}</p>
-                        <button
-                          className="cs-begin-btn cs-full-width"
-                          onClick={() => advanceIntervention(iv.steps.length)}
-                        >
-                          {isLast ? "DONE" : "NEXT"}
-                        </button>
-                        <button className="cs-secondary-btn" onClick={closeIntervention}>
-                          Back to list
-                        </button>
-                      </>
-                    )}
-                  </div>
-                );
-              })()}
             </div>
 
             <div className="cs-footer-note">
