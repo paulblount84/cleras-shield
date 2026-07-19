@@ -482,6 +482,17 @@ function suggestedInterventionIds(pct, incidentFlag) {
   return [];
 }
 
+// Tiers a raw 0-100 score using the same thresholds as readiness. For stress,
+// pass invertLabel=true: the underlying score is stored "inverted" (100 =
+// calm, 15 = overwhelming) to feed the weighted formula correctly, but the
+// displayed number is un-inverted (100 - score) so a bigger number reads as
+// "more stressed" — invertLabel keeps the HIGH/LOW word matching that.
+function tierOf(raw, invertLabel) {
+  if (raw >= 75) return { color: "var(--sig-green)", label: invertLabel ? "LOW" : "HIGH" };
+  if (raw >= 45) return { color: "var(--sig-amber)", label: "MODERATE" };
+  return { color: "var(--sig-red)", label: invertLabel ? "HIGH" : "LOW" };
+}
+
 function getCondition(pct) {
   if (pct >= 75)
     return {
@@ -1569,6 +1580,7 @@ export default function CleraShieldCheckIn() {
         .cs-stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
         .cs-stat-card { background: #171C24; border: 1px solid var(--panel-border); border-radius: 3px; padding: 12px 6px; text-align: center; }
         .cs-stat-value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; font-weight: 600; }
+        .cs-stat-tier { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; margin-top: 2px; }
         .cs-stat-label { font-size: 10.5px; color: var(--text-muted); letter-spacing: 0.06em; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
         .cs-lock-badge {
           position: absolute;
@@ -2329,15 +2341,21 @@ export default function CleraShieldCheckIn() {
                   <div className="cs-breakdown">
                     <div className="cs-breakdown-row">
                       <span>SLEEP</span>
-                      <b>{values.sleep ?? 0} / 100</b>
+                      <b style={{ color: tierOf(values.sleep ?? 0).color }}>
+                        {tierOf(values.sleep ?? 0).label}
+                      </b>
                     </div>
                     <div className="cs-breakdown-row">
                       <span>STRESS</span>
-                      <b>{values.stress ?? 0} / 100</b>
+                      <b style={{ color: tierOf(values.stress ?? 0, true).color }}>
+                        {tierOf(values.stress ?? 0, true).label}
+                      </b>
                     </div>
                     <div className="cs-breakdown-row">
                       <span>RECOVERY</span>
-                      <b>{values.recovery ?? 0} / 100</b>
+                      <b style={{ color: tierOf(values.recovery ?? 0).color }}>
+                        {tierOf(values.recovery ?? 0).label}
+                      </b>
                     </div>
                     <div className="cs-breakdown-row">
                       <span>INCIDENT</span>
@@ -2446,27 +2464,42 @@ export default function CleraShieldCheckIn() {
 
                       <div className="cs-condition-dist">
                         <div className="cs-dist-chip" style={{ color: "var(--sig-green)" }}>
-                          GREEN · {dist.green}
+                          HIGH · {dist.green}
                         </div>
                         <div className="cs-dist-chip" style={{ color: "var(--sig-amber)" }}>
-                          AMBER · {dist.amber}
+                          MODERATE · {dist.amber}
                         </div>
                         <div className="cs-dist-chip" style={{ color: "var(--sig-red)" }}>
-                          RED · {dist.red}
+                          LOW · {dist.red}
                         </div>
                       </div>
 
                       <div className="cs-stats-grid">
-                        <div className="cs-stat-card">
-                          <div className="cs-stat-value">{avg.sleep}</div>
+                        <div className="cs-stat-card" style={{ borderColor: tierOf(avg.sleep).color }}>
+                          <div className="cs-stat-value" style={{ color: tierOf(avg.sleep).color }}>
+                            {avg.sleep}
+                          </div>
+                          <div className="cs-stat-tier" style={{ color: tierOf(avg.sleep).color }}>
+                            {tierOf(avg.sleep).label}
+                          </div>
                           <div className="cs-stat-label">AVG SLEEP</div>
                         </div>
-                        <div className="cs-stat-card">
-                          <div className="cs-stat-value">{avg.stress}</div>
+                        <div className="cs-stat-card" style={{ borderColor: tierOf(avg.stress).color }}>
+                          <div className="cs-stat-value" style={{ color: tierOf(avg.stress).color }}>
+                            {100 - avg.stress}
+                          </div>
+                          <div className="cs-stat-tier" style={{ color: tierOf(avg.stress).color }}>
+                            {tierOf(avg.stress, true).label}
+                          </div>
                           <div className="cs-stat-label">AVG STRESS</div>
                         </div>
-                        <div className="cs-stat-card">
-                          <div className="cs-stat-value">{avg.recovery}</div>
+                        <div className="cs-stat-card" style={{ borderColor: tierOf(avg.recovery).color }}>
+                          <div className="cs-stat-value" style={{ color: tierOf(avg.recovery).color }}>
+                            {avg.recovery}
+                          </div>
+                          <div className="cs-stat-tier" style={{ color: tierOf(avg.recovery).color }}>
+                            {tierOf(avg.recovery).label}
+                          </div>
                           <div className="cs-stat-label">AVG RECOVERY</div>
                         </div>
                       </div>
