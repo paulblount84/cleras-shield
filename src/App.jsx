@@ -1,4 +1,4 @@
-// Frontend refrector branch
+import homepage from "./components/homepage";
 import React, { useState, useMemo, useEffect } from "react";
 import {
   AreaChart,
