@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   AreaChart,
   Area,
@@ -9,52 +9,36 @@ import {
   CartesianGrid,
 } from "recharts";
 
-/* ---------- Supabase (REST, no SDK) ----------
-   The session (access token, refresh token, expiry) persists in sessionStorage
-   so a page refresh doesn't sign people out — but it's scoped to the browser
-   tab: closing the tab or browser clears it, and it's never shared across
-   tabs the way localStorage would be. Every read/write of check-in data goes
-   straight to Supabase and is scoped by Postgres RLS to auth.uid(), so this
-   file never holds another officer's data regardless of what's cached locally.
+/* ---------- API client (same-origin, cookie-based) ----------
+   Every call here hits this app's own /api/* serverless functions, never
+   Supabase directly. The functions hold the session as httpOnly cookies —
+   this file (and every other line of client JS) never sees an access token
+   or refresh token at all, not even transiently, except for the one
+   unavoidable case of a password-recovery token arriving via URL hash (see
+   the reset-confirm handling below), which is held only in memory for the
+   few seconds until it's handed to the server and never stored.
 ------------------------------------------------------------------------------- */
 
-const SUPABASE_URL = "https://rayuaqfwcxzqwekbrpbs.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_uFpL72MpnDQGNJtXVYrP5A_oRUodxp7";
-
-// Session persists in sessionStorage (per-tab, cleared when the tab/browser
-// closes) rather than staying purely in-memory — a deliberate tradeoff so a
-// page refresh doesn't sign people out, at the cost of the token being
-// readable by any script running on the page for the life of that tab.
-const SESSION_STORAGE_KEY = "cs-session";
-
-function loadStoredSession() {
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  let data = {};
   try {
-    const raw = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || !parsed.accessToken || !parsed.refreshToken) return null;
-    return parsed;
+    data = await res.json();
   } catch (e) {
-    return null;
+    /* empty body */
   }
-}
-
-function saveStoredSession(sessionObj) {
-  try {
-    if (sessionObj) {
-      window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionObj));
-    } else {
-      window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
-    }
-  } catch (e) {
-    /* storage unavailable (private browsing, quota, etc.) — fail silently, session just won't persist */
+  if (!res.ok) {
+    const err = new Error((data && data.message) || "Something went wrong. Please try again.");
+    err.status = res.status;
+    err.body = data;
+    throw err;
   }
+  return data;
 }
-
-// Columns the browser is actually allowed to SELECT (matches the column-level
-// GRANTs in the database — this list isn't just cosmetic, the server enforces it).
-const CHECK_IN_COLUMNS =
-  "check_date,readiness_index,condition,sleep_score,stress_score,recovery_score,incident_flag,incident_label,created_at";
 
 function qrCodeToImageSrc(qr) {
   if (!qr) return "";
@@ -62,231 +46,77 @@ function qrCodeToImageSrc(qr) {
   return `data:image/svg+xml;utf8,${encodeURIComponent(qr)}`; // raw SVG markup — encode it ourselves
 }
 
-function mapAuthError(rawMessage, context) {
-  // Never surface raw Supabase/Postgres error internals to the person using the app.
-  if (context === "signin") return "Unable to sign in with those credentials.";
-  const msg = (rawMessage || "").toLowerCase();
-  if (msg.includes("already registered") || msg.includes("already exists")) {
-    return "That email may already have an account. Try signing in instead.";
-  }
-  if (msg.includes("password")) {
-    return "Password must be at least 12 characters.";
-  }
-  if (msg.includes("email") && msg.includes("invalid")) {
-    return "Enter a valid email address.";
-  }
-  return "Something went wrong. Please try again.";
-}
-
-async function authRequest(path, body) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
-    method: "POST",
-    headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  let data;
-  try {
-    data = await res.json();
-  } catch (e) {
-    data = {};
-  }
-  if (!res.ok) {
-    const raw = data && (data.error_description || data.msg || data.error);
-    const err = new Error(raw || "Authentication failed");
-    err.raw = raw;
-    throw err;
-  }
-  return data;
+function getSession() {
+  return api("/api/auth/session");
 }
 
 function signUpRequest(email, password, role) {
-  return authRequest("signup", { email, password, data: { role } });
+  return api("/api/auth/signup", { method: "POST", body: JSON.stringify({ email, password, role }) });
 }
 
 function signInRequest(email, password) {
-  return authRequest("token?grant_type=password", { email, password });
+  return api("/api/auth/signin", { method: "POST", body: JSON.stringify({ email, password }) });
 }
 
-async function requestPasswordReset(email) {
-  // Supabase always responds 200 here regardless of whether the email exists,
-  // to avoid confirming/denying account existence to the caller.
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+function logoutRequest() {
+  return api("/api/auth/logout", { method: "POST" }).catch(() => {});
+}
+
+function requestPasswordReset(email) {
+  return api("/api/auth/reset-request", { method: "POST", body: JSON.stringify({ email }) }).catch(() => {});
+}
+
+function confirmPasswordReset({ accessToken, refreshToken, expiresIn, newPassword }) {
+  return api("/api/auth/reset-confirm", {
     method: "POST",
-    headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ accessToken, refreshToken, expiresIn, newPassword }),
   });
-  if (!res.ok) {
-    let data = {};
-    try {
-      data = await res.json();
-    } catch (e) {
-      /* ignore parse failure, fall through to generic message */
-    }
-    throw new Error(data.error_description || data.msg || "Could not send reset email.");
-  }
-}
-
-async function updatePasswordWithRecoveryToken(accessToken, newPassword) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-    method: "PUT",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ password: newPassword }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error_description || data.msg || "Could not update password.");
-  return data; // updated user object
-}
-
-function refreshSessionRequest(refreshToken) {
-  return authRequest("token?grant_type=refresh_token", { refresh_token: refreshToken });
-}
-
-async function logoutRequest(accessToken) {
-  try {
-    await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
-      method: "POST",
-      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
-    });
-  } catch (e) {
-    // Even if the network call fails, the caller clears local session state anyway.
-  }
 }
 
 /* ---------- TOTP MFA ---------- */
 
-async function fetchUserFactors(accessToken) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error("Could not check two-factor status.");
-  return data.factors || [];
+function fetchUserFactors() {
+  return api("/api/auth/session").then((d) => d.factors || []);
 }
 
-async function enrollTotpFactor(accessToken) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/factors`, {
+function enrollTotpFactor() {
+  return api("/api/mfa/enroll", { method: "POST" });
+}
+
+function unenrollFactor(factorId) {
+  return api("/api/mfa/unenroll", { method: "POST", body: JSON.stringify({ factorId }) }).catch(() => {});
+}
+
+function createMfaChallenge(factorId, pendingToken) {
+  return api("/api/mfa/challenge", { method: "POST", body: JSON.stringify({ factorId, pendingToken }) });
+}
+
+function verifyMfaChallenge(factorId, challengeId, code, pendingToken) {
+  return api("/api/mfa/verify", {
     method: "POST",
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ factor_type: "totp" }),
+    body: JSON.stringify({ factorId, challengeId, code, pendingToken }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error_description || data.msg || "Could not start two-factor setup.");
-  return data; // { id, totp: { qr_code, secret, uri } }
 }
 
-async function unenrollFactor(accessToken, factorId) {
-  try {
-    await fetch(`${SUPABASE_URL}/auth/v1/factors/${factorId}`, {
-      method: "DELETE",
-      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
-    });
-  } catch (e) {
-    /* best-effort cleanup of an abandoned/unverified factor, not critical */
-  }
+/* ---------- Check-ins & interventions ---------- */
+
+function fetchCheckIns(fromDate) {
+  return api(`/api/checkins/list?from=${fromDate}`);
 }
 
-async function createMfaChallenge(accessToken, factorId) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/factors/${factorId}/challenge`, {
+function submitCheckIn({ sleepScore, stressScore, recoveryScore, incidentLabel }) {
+  return api("/api/checkins/submit", {
     method: "POST",
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ sleepScore, stressScore, recoveryScore, incidentLabel }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error_description || data.msg || "Could not start verification.");
-  return data; // { id, expires_at }
 }
 
-async function verifyMfaChallenge(accessToken, factorId, challengeId, code) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/factors/${factorId}/verify`, {
-    method: "POST",
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ challenge_id: challengeId, code }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error("That code didn't match. Try again.");
-  return data; // new aal2 session: { access_token, refresh_token, expires_in, user }
+function fetchInterventionCompletions() {
+  return api("/api/interventions/list");
 }
 
-async function fetchCheckIns(accessToken, fromDate) {
-  // No user_id filter here on purpose — RLS identifies the caller server-side.
-  // Adding one client-side would be cosmetic, not a security control.
-  const url = `${SUPABASE_URL}/rest/v1/check_ins?select=${CHECK_IN_COLUMNS}&check_date=gte.${fromDate}&order=check_date.asc`;
-  const res = await fetch(url, {
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
-  });
-  if (!res.ok) {
-    const err = new Error("Failed to load check-ins");
-    err.status = res.status;
-    throw err;
-  }
-  return res.json();
-}
-
-async function submitCheckIn(accessToken, { sleepScore, stressScore, recoveryScore, incidentLabel }) {
-  // The browser sends only raw answer choices. readiness_index, condition,
-  // incident_flag, and check_date are all computed/derived server-side inside
-  // this RPC — the only way the check_ins table can be written to at all
-  // (direct INSERT/UPDATE privileges are revoked).
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/submit_check_in`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      p_sleep_score: sleepScore,
-      p_stress_score: stressScore,
-      p_recovery_score: recoveryScore,
-      p_incident_label: incidentLabel,
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    const raw = (data && (data.message || data.hint)) || "";
-    if (raw.includes("24 hours")) {
-      throw new Error("You can check in again 24 hours after your last check-in.");
-    }
-    const err = new Error("Could not save your check-in. Please try again.");
-    err.status = res.status;
-    throw err;
-  }
-  return Array.isArray(data) ? data[0] : data;
-}
-
-async function fetchInterventionCompletions(accessToken) {
-  const url = `${SUPABASE_URL}/rest/v1/intervention_completions?select=intervention_id,completed_at`;
-  const res = await fetch(url, {
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken}` },
-  });
-  if (!res.ok) {
-    const err = new Error("Failed to load intervention history");
-    err.status = res.status;
-    throw err;
-  }
-  return res.json();
-}
-
-async function logInterventionCompletion(accessToken, interventionId) {
-  // Same pattern as check-ins: user_id is never sent by the client, the RPC
-  // derives it from auth.uid(). Direct INSERT on the table is revoked.
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/log_intervention_completion`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ p_intervention_id: interventionId }),
-  });
-  if (!res.ok) {
-    const err = new Error("Failed to log completion");
-    err.status = res.status;
-    throw err;
-  }
+function logInterventionCompletion(interventionId) {
+  return api("/api/interventions/log", { method: "POST", body: JSON.stringify({ interventionId }) });
 }
 
 /* ---------- Scoring model ---------- */
@@ -794,7 +624,7 @@ function Homepage({ onGetStarted, onSignIn }) {
 /* ---------- Main ---------- */
 
 export default function CleraShieldCheckIn() {
-  const [session, setSession] = useState(loadStoredSession); // { accessToken, refreshToken, expiresAt, userId, email }
+  const [session, setSession] = useState(null); // { userId, email } — no tokens ever live here
   const [authMode, setAuthMode] = useState("signin"); // 'signin' | 'signup' | 'reset-request' | 'reset-confirm'
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -807,19 +637,27 @@ export default function CleraShieldCheckIn() {
   const [authLoading, setAuthLoading] = useState(false);
 
   // Password recovery: tokens arrive in the URL hash after the person clicks
-  // the emailed reset link and gets redirected back here.
+  // the emailed reset link. This is the one unavoidable case where a raw
+  // token briefly exists in client memory — Supabase delivers it via a URL
+  // fragment, which by the HTTP spec never reaches any server — but it's
+  // held only in this state, never in storage, and only until it's handed
+  // to /api/auth/reset-confirm, which is where cookie-based auth takes over.
   const [recoveryAccessToken, setRecoveryAccessToken] = useState(null);
   const [recoveryRefreshToken, setRecoveryRefreshToken] = useState(null);
   const [recoveryExpiresIn, setRecoveryExpiresIn] = useState(3600);
   const [newPassword, setNewPassword] = useState("");
   const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
 
-  // MFA step-up state. `pendingSession` holds an aal1 session obtained from
-  // primary sign-in/sign-up while a second factor is being resolved — it is
-  // never treated as the "real" session (never fed to authedRequest/history
-  // loading) until MFA is satisfied or explicitly skipped.
+  // MFA step-up state. `mfaPendingToken` is only ever populated for the
+  // sign-in-time "account already has 2FA" case, where the server
+  // deliberately withholds cookies until the challenge is verified (see
+  // api/auth/signin.js) — it's held only in memory and discarded the moment
+  // MFA resolves or is cancelled. For the "just signed up / never enrolled"
+  // offer-and-setup path, cookies already exist (there's no factor to gate
+  // on yet), so those calls are plain cookie-authenticated requests.
   const [mfaStage, setMfaStage] = useState(null); // null | 'offer' | 'setup' | 'challenge'
-  const [pendingSession, setPendingSession] = useState(null);
+  const [pendingUser, setPendingUser] = useState(null);
+  const [mfaPendingToken, setMfaPendingToken] = useState(null);
   const [mfaFactorId, setMfaFactorId] = useState(null);
   const [mfaChallengeId, setMfaChallengeId] = useState(null);
   const [mfaQrSvg, setMfaQrSvg] = useState("");
@@ -846,20 +684,6 @@ export default function CleraShieldCheckIn() {
   const [completionCounts, setCompletionCounts] = useState({});
   const [openDomains, setOpenDomains] = useState({ CBT: true, DBT: false, ACT: false });
 
-  // sessionRef mirrors `session` for use inside async callbacks, which would
-  // otherwise close over a stale value. authEpochRef increments on every
-  // sign-in and sign-out; any in-flight refresh checks its captured epoch
-  // before applying its result, so a refresh started before logout (or before
-  // a *different* login) can never resurrect/overwrite the wrong session.
-  const sessionRef = useRef(null);
-  const authEpochRef = useRef(0);
-  const refreshingRef = useRef(null);
-
-  useEffect(() => {
-    sessionRef.current = session;
-    saveStoredSession(session);
-  }, [session]);
-
   useEffect(() => {
     const t = setInterval(() => setClock(new Date()), 1000);
     return () => clearInterval(t);
@@ -868,6 +692,23 @@ export default function CleraShieldCheckIn() {
   useEffect(() => {
     const t = setInterval(() => setLockNow(Date.now()), 1000);
     return () => clearInterval(t);
+  }, []);
+
+  // Bootstrap: ask the server whether the httpOnly cookie represents a valid
+  // session. This is what makes "refresh keeps you signed in" work now —
+  // there's nothing client-side to restore, the cookie already did its job
+  // and the server tells us who it belongs to.
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await getSession();
+        if (data.authenticated) {
+          setSession({ userId: data.user.id, email: data.user.email });
+        }
+      } catch (e) {
+        /* not authenticated — stay on the homepage */
+      }
+    })();
   }, []);
 
   useEffect(() => {
@@ -890,84 +731,6 @@ export default function CleraShieldCheckIn() {
     }
   }, []);
 
-  function buildSession(data) {
-    const expiresInMs = (data.expires_in || 3600) * 1000;
-    return {
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token,
-      expiresAt: Date.now() + expiresInMs,
-      userId: data.user.id,
-      email: data.user.email,
-    };
-  }
-
-  // Single-flight refresh: concurrent callers (the proactive timer and any
-  // 401-triggered retry) share the same in-flight promise instead of firing
-  // duplicate refresh requests, which would race to rotate the refresh token
-  // and could invalidate each other.
-  async function refreshSession() {
-    if (refreshingRef.current) return refreshingRef.current;
-    const epochAtStart = authEpochRef.current;
-    const current = sessionRef.current;
-    if (!current) throw new Error("Not authenticated");
-
-    refreshingRef.current = (async () => {
-      try {
-        const data = await refreshSessionRequest(current.refreshToken);
-        const next = buildSession(data);
-        // Only apply this result if nothing logged out/in again while it was in flight.
-        if (authEpochRef.current === epochAtStart) {
-          setSession(next);
-          sessionRef.current = next;
-        }
-        return next;
-      } catch (e) {
-        if (authEpochRef.current === epochAtStart) {
-          setSession(null);
-          sessionRef.current = null;
-          setAuthError("Your session expired. Please sign in again.");
-          setPage("auth");
-          setAuthMode("signin");
-        }
-        throw e;
-      } finally {
-        refreshingRef.current = null;
-      }
-    })();
-
-    return refreshingRef.current;
-  }
-
-  // Wraps a data call: uses the current token, and on a 401 (which can still
-  // happen even with proactive refresh — e.g. a backgrounded mobile tab
-  // throttling timers) refreshes exactly once and retries exactly once.
-  async function authedRequest(fn) {
-    const current = sessionRef.current;
-    if (!current) throw new Error("Not authenticated");
-    try {
-      return await fn(current.accessToken);
-    } catch (e) {
-      if (e.status === 401) {
-        const refreshed = await refreshSession();
-        return await fn(refreshed.accessToken);
-      }
-      throw e;
-    }
-  }
-
-  // Proactively refresh shortly before expiry so a normal, foregrounded
-  // session never has to hit the 401-retry path at all.
-  useEffect(() => {
-    if (!session) return;
-    const msUntilRefresh = Math.max(session.expiresAt - Date.now() - 60000, 5000);
-    const t = setTimeout(() => {
-      refreshSession().catch(() => {
-        /* refreshSession already clears state and surfaces an error on failure */
-      });
-    }, msUntilRefresh);
-    return () => clearTimeout(t);
-  }, [session]);
-
   useEffect(() => {
     if (!session) return;
     (async () => {
@@ -975,7 +738,7 @@ export default function CleraShieldCheckIn() {
       try {
         const from = new Date();
         from.setDate(from.getDate() - 13);
-        const rows = await authedRequest((token) => fetchCheckIns(token, dateKey(from)));
+        const rows = await fetchCheckIns(dateKey(from));
         const h = {};
         rows.forEach((r) => {
           h[r.check_date] = {
@@ -1001,7 +764,7 @@ export default function CleraShieldCheckIn() {
     if (!session) return;
     (async () => {
       try {
-        const rows = await authedRequest((token) => fetchInterventionCompletions(token));
+        const rows = await fetchInterventionCompletions();
         const counts = {};
         rows.forEach((r) => {
           counts[r.intervention_id] = (counts[r.intervention_id] || 0) + 1;
@@ -1013,12 +776,11 @@ export default function CleraShieldCheckIn() {
     })();
   }, [session]);
 
-  function finalizeSession(sessionObj) {
-    authEpochRef.current += 1;
-    sessionRef.current = sessionObj;
-    setSession(sessionObj);
+  function finalizeSession(user) {
+    setSession({ userId: user.id, email: user.email });
     setMfaStage(null);
-    setPendingSession(null);
+    setPendingUser(null);
+    setMfaPendingToken(null);
     setMfaFactorId(null);
     setMfaChallengeId(null);
     setMfaQrSvg("");
@@ -1028,35 +790,20 @@ export default function CleraShieldCheckIn() {
     setMfaLoading(false);
   }
 
-  async function handlePostPrimaryAuth(data) {
-    const pending = buildSession(data); // aal1 — not yet the "real" session
-    let factors = [];
-    try {
-      factors = await fetchUserFactors(pending.accessToken);
-    } catch (e) {
-      // Fail open on a transient factor-check error rather than locking the
-      // person out of an app they just correctly authenticated into.
-      finalizeSession(pending);
-      return;
-    }
-    const verifiedTotp = factors.find((f) => f.factor_type === "totp" && f.status === "verified");
-
-    if (verifiedTotp) {
-      setPendingSession(pending);
-      setMfaFactorId(verifiedTotp.id);
+  function handlePostPrimaryAuth(data) {
+    if (data.status === "mfa_required") {
+      setMfaPendingToken(data.pendingToken);
+      setMfaFactorId(data.factorId);
       setMfaStage("challenge");
-      try {
-        const challenge = await createMfaChallenge(pending.accessToken, verifiedTotp.id);
-        setMfaChallengeId(challenge.id);
-      } catch (e) {
-        setMfaError("Could not start verification. Try again.");
-      }
+      createMfaChallenge(data.factorId, data.pendingToken)
+        .then((c) => setMfaChallengeId(c.id))
+        .catch(() => setMfaError("Could not start verification. Try again."));
       return;
     }
-
-    // No factor enrolled yet — offer setup, but it's skippable so nobody gets
-    // permanently locked out of the app by this rollout.
-    setPendingSession(pending);
+    // status === 'authenticated': cookies are already live. The server only
+    // takes this branch when there's no verified factor, so this is always
+    // either a brand-new account or one that never enrolled — offer setup.
+    setPendingUser(data.user);
     setMfaStage("offer");
   }
 
@@ -1066,20 +813,21 @@ export default function CleraShieldCheckIn() {
     setAuthNotice("");
     setAuthLoading(true);
     try {
+      let data;
       if (authMode === "signup") {
-        const data = await signUpRequest(authEmail, authPassword, authRole);
-        if (data.access_token && data.user) {
-          await handlePostPrimaryAuth(data);
-        } else {
+        data = await signUpRequest(authEmail, authPassword, authRole);
+        if (data.status === "confirmation_required") {
           setAuthNotice("Account created. Check your email to confirm it, then sign in.");
           setAuthMode("signin");
+          setAuthLoading(false);
+          return;
         }
       } else {
-        const data = await signInRequest(authEmail, authPassword);
-        await handlePostPrimaryAuth(data);
+        data = await signInRequest(authEmail, authPassword);
       }
+      handlePostPrimaryAuth(data);
     } catch (err) {
-      setAuthError(mapAuthError(err.raw || err.message, authMode === "signin" ? "signin" : "signup"));
+      setAuthError(err.message || "Something went wrong. Please try again.");
     } finally {
       setAuthLoading(false);
     }
@@ -1090,16 +838,11 @@ export default function CleraShieldCheckIn() {
     setAuthError("");
     setAuthNotice("");
     setAuthLoading(true);
-    try {
-      await requestPasswordReset(authEmail);
-    } catch (e2) {
-      /* Intentionally show the same message on failure — not confirming or
-         denying whether the email has an account (matches Supabase's own
-         anti-enumeration behavior on this endpoint). */
-    } finally {
-      setAuthNotice("If that email has an account, a reset link is on its way. Check your inbox.");
-      setAuthLoading(false);
-    }
+    await requestPasswordReset(authEmail);
+    // Same message regardless of outcome — matches Supabase's own
+    // anti-enumeration behavior on this endpoint.
+    setAuthNotice("If that email has an account, a reset link is on its way. Check your inbox.");
+    setAuthLoading(false);
   }
 
   async function handleConfirmReset(e) {
@@ -1117,36 +860,39 @@ export default function CleraShieldCheckIn() {
       return;
     }
     try {
-      const updatedUser = await updatePasswordWithRecoveryToken(recoveryAccessToken, newPassword);
-      const sessionData = {
-        access_token: recoveryAccessToken,
-        refresh_token: recoveryRefreshToken,
-        expires_in: recoveryExpiresIn,
-        user: updatedUser,
-      };
+      const data = await confirmPasswordReset({
+        accessToken: recoveryAccessToken,
+        refreshToken: recoveryRefreshToken,
+        expiresIn: recoveryExpiresIn,
+        newPassword,
+      });
       setNewPassword("");
       setNewPasswordConfirm("");
       setRecoveryAccessToken(null);
       setRecoveryRefreshToken(null);
-      await handlePostPrimaryAuth(sessionData);
+      handlePostPrimaryAuth(data);
     } catch (err) {
-      setAuthError(
-        "That reset link has expired or was already used. Request a new one."
-      );
+      setAuthError(err.message || "That reset link has expired or was already used. Request a new one.");
     } finally {
       setAuthLoading(false);
     }
   }
 
   function cancelMfa() {
-    if (pendingSession) {
-      logoutRequest(pendingSession.accessToken);
-      if (mfaStage === "setup" && mfaFactorId) {
-        unenrollFactor(pendingSession.accessToken, mfaFactorId);
-      }
+    if (mfaStage === "setup" && mfaFactorId) {
+      unenrollFactor(mfaFactorId);
     }
+    if (mfaStage === "offer" || mfaStage === "setup") {
+      // A cookie session already exists for this path (there was no factor
+      // to gate on) — cancelling means aborting the whole sign-in, not just
+      // the MFA prompt, so fully sign out.
+      logoutRequest();
+    }
+    // 'challenge' stage: no cookie was ever set for the pending token —
+    // nothing to revoke, it just expires unused within the hour.
     setMfaStage(null);
-    setPendingSession(null);
+    setPendingUser(null);
+    setMfaPendingToken(null);
     setMfaFactorId(null);
     setMfaChallengeId(null);
     setMfaQrSvg("");
@@ -1156,14 +902,14 @@ export default function CleraShieldCheckIn() {
   }
 
   function skipMfaSetup() {
-    if (pendingSession) finalizeSession(pendingSession);
+    if (pendingUser) finalizeSession(pendingUser);
   }
 
   async function startMfaSetup() {
     setMfaError("");
     setMfaLoading(true);
     try {
-      const enrolled = await enrollTotpFactor(pendingSession.accessToken);
+      const enrolled = await enrollTotpFactor();
       setMfaFactorId(enrolled.id);
       setMfaQrSvg((enrolled.totp && enrolled.totp.qr_code) || "");
       setMfaSecret((enrolled.totp && enrolled.totp.secret) || "");
@@ -1179,9 +925,9 @@ export default function CleraShieldCheckIn() {
     setMfaError("");
     setMfaLoading(true);
     try {
-      const challenge = await createMfaChallenge(pendingSession.accessToken, mfaFactorId);
-      const verified = await verifyMfaChallenge(pendingSession.accessToken, mfaFactorId, challenge.id, mfaCode);
-      finalizeSession(buildSession(verified));
+      const challenge = await createMfaChallenge(mfaFactorId);
+      const verified = await verifyMfaChallenge(mfaFactorId, challenge.id, mfaCode);
+      finalizeSession(verified.user);
     } catch (e) {
       setMfaError(e.message || "That code didn't match. Try again.");
       setMfaLoading(false);
@@ -1194,12 +940,12 @@ export default function CleraShieldCheckIn() {
     try {
       let challengeId = mfaChallengeId;
       if (!challengeId) {
-        const challenge = await createMfaChallenge(pendingSession.accessToken, mfaFactorId);
+        const challenge = await createMfaChallenge(mfaFactorId, mfaPendingToken);
         challengeId = challenge.id;
         setMfaChallengeId(challengeId);
       }
-      const verified = await verifyMfaChallenge(pendingSession.accessToken, mfaFactorId, challengeId, mfaCode);
-      finalizeSession(buildSession(verified));
+      const verified = await verifyMfaChallenge(mfaFactorId, challengeId, mfaCode, mfaPendingToken);
+      finalizeSession(verified.user);
     } catch (e) {
       setMfaError(e.message || "That code didn't match. Try again.");
       setMfaCode("");
@@ -1207,16 +953,8 @@ export default function CleraShieldCheckIn() {
     }
   }
 
-  async function signOut() {
-    const accessToken = session && session.accessToken;
-    // Bump the epoch first: any refresh already in flight will see this new
-    // epoch when it resolves and discard its own result instead of reviving
-    // a session that's about to be cleared.
-    authEpochRef.current += 1;
-    // Clear local state next so the UI responds instantly regardless of
-    // whether the network call below succeeds — per the "clear state even if
-    // logout fails" requirement.
-    sessionRef.current = null;
+  function signOut() {
+    logoutRequest();
     setSession(null);
     setHistory({});
     setView("checkin");
@@ -1229,21 +967,17 @@ export default function CleraShieldCheckIn() {
     setAuthError("");
     setNewPassword("");
     setNewPasswordConfirm("");
-    setRecoveryAccessToken(null);
-    setRecoveryRefreshToken(null);
     setCompletionCounts({});
     closeIntervention();
     setMfaStage(null);
-    setPendingSession(null);
+    setPendingUser(null);
+    setMfaPendingToken(null);
     setMfaFactorId(null);
     setMfaChallengeId(null);
     setMfaQrSvg("");
     setMfaSecret("");
     setMfaCode("");
     setMfaError("");
-    if (accessToken) {
-      logoutRequest(accessToken);
-    }
   }
 
   const NAV_ITEMS = [
@@ -1308,14 +1042,12 @@ export default function CleraShieldCheckIn() {
   async function finishCheckIn() {
     setSaveError("");
     try {
-      const saved = await authedRequest((token) =>
-        submitCheckIn(token, {
-          sleepScore: values.sleep ?? 0,
-          stressScore: values.stress ?? 0,
-          recoveryScore: values.recovery ?? 0,
-          incidentLabel: incidentLabel ?? "None",
-        })
-      );
+      const saved = await submitCheckIn({
+        sleepScore: values.sleep ?? 0,
+        stressScore: values.stress ?? 0,
+        recoveryScore: values.recovery ?? 0,
+        incidentLabel: incidentLabel ?? "None",
+      });
       // Trust only what the server computed and returned — not the client-side
       // preview values used to render the result screen a moment ago.
       const key = saved.check_date;
@@ -1368,7 +1100,7 @@ export default function CleraShieldCheckIn() {
     setCompletionCounts((prev) => ({ ...prev, [id]: (prev[id] || 0) + 1 }));
     if (session) {
       try {
-        await authedRequest((token) => logInterventionCompletion(token, id));
+        await logInterventionCompletion(id);
       } catch (e) {
         /* non-critical, completion still shown locally */
       }
