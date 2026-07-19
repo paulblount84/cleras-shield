@@ -1,4 +1,4 @@
-import homepage from "./components/homepage";
+import Homepage from "./components/Homepage";
 import React, { useState, useMemo, useEffect } from "react";
 import {
   AreaChart,
