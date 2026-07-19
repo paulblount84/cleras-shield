@@ -87,14 +87,10 @@ function unenrollFactor(factorId) {
   return api("/api/mfa/unenroll", { method: "POST", body: JSON.stringify({ factorId }) }).catch(() => {});
 }
 
-function createMfaChallenge(factorId, pendingToken) {
-  return api("/api/mfa/challenge", { method: "POST", body: JSON.stringify({ factorId, pendingToken }) });
-}
-
-function verifyMfaChallenge(factorId, challengeId, code, pendingToken) {
+function verifyMfaChallenge(factorId, code, pendingToken) {
   return api("/api/mfa/verify", {
     method: "POST",
-    body: JSON.stringify({ factorId, challengeId, code, pendingToken }),
+    body: JSON.stringify({ factorId, code, pendingToken }),
   });
 }
 
@@ -795,9 +791,6 @@ export default function CleraShieldCheckIn() {
       setMfaPendingToken(data.pendingToken);
       setMfaFactorId(data.factorId);
       setMfaStage("challenge");
-      createMfaChallenge(data.factorId, data.pendingToken)
-        .then((c) => setMfaChallengeId(c.id))
-        .catch(() => setMfaError("Could not start verification. Try again."));
       return;
     }
     // status === 'authenticated': cookies are already live. The server only
@@ -925,8 +918,7 @@ export default function CleraShieldCheckIn() {
     setMfaError("");
     setMfaLoading(true);
     try {
-      const challenge = await createMfaChallenge(mfaFactorId);
-      const verified = await verifyMfaChallenge(mfaFactorId, challenge.id, mfaCode);
+      const verified = await verifyMfaChallenge(mfaFactorId, mfaCode);
       finalizeSession(verified.user);
     } catch (e) {
       setMfaError(e.message || "That code didn't match. Try again.");
@@ -938,13 +930,7 @@ export default function CleraShieldCheckIn() {
     setMfaError("");
     setMfaLoading(true);
     try {
-      let challengeId = mfaChallengeId;
-      if (!challengeId) {
-        const challenge = await createMfaChallenge(mfaFactorId, mfaPendingToken);
-        challengeId = challenge.id;
-        setMfaChallengeId(challengeId);
-      }
-      const verified = await verifyMfaChallenge(mfaFactorId, challengeId, mfaCode, mfaPendingToken);
+      const verified = await verifyMfaChallenge(mfaFactorId, mfaCode, mfaPendingToken);
       finalizeSession(verified.user);
     } catch (e) {
       setMfaError(e.message || "That code didn't match. Try again.");
