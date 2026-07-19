@@ -9,7 +9,6 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from "recharts";
-
 /* ---------- API client (same-origin, cookie-based) ----------
    Every call here hits this app's own /api/* serverless functions, never
    Supabase directly. The functions hold the session as httpOnly cookies —
