@@ -1,4 +1,4 @@
-function homepage({ onGetStarted, onSignIn }) {
+function Homepage({ onGetStarted, onSignIn }) {
   return (
     <div className="cs-home">
       <section id="overview" className="cs-home-section cs-home-hero">
@@ -94,5 +94,4 @@ function homepage({ onGetStarted, onSignIn }) {
     </div>
   );
 }
-export default homepage 
-test
+export default Homepage
