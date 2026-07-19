@@ -8,11 +8,20 @@ function showError(msg) {
 }
 
 window.addEventListener('error', function (e) {
-  showError((e.error && e.error.stack) || e.message || 'Resource failed to load: ' + (e.target && e.target.src));
+  // Safari's error.stack is just frames — it never includes the message,
+  // unlike Chrome. Build the message explicitly so it's never dropped.
+  var name = (e.error && e.error.name) || 'Error';
+  var message = (e.error && e.error.message) || e.message || 'Resource failed to load: ' + (e.target && e.target.src);
+  var stack = (e.error && e.error.stack) || '';
+  showError(name + ': ' + message + '\n\n' + stack);
 }, true);
 
 window.addEventListener('unhandledrejection', function (e) {
-  showError((e.reason && e.reason.stack) || String(e.reason));
+  var reason = e.reason;
+  var name = (reason && reason.name) || 'UnhandledRejection';
+  var message = (reason && reason.message) || String(reason);
+  var stack = (reason && reason.stack) || '';
+  showError(name + ': ' + message + '\n\n' + stack);
 });
 
 setTimeout(function () {
