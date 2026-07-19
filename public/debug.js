@@ -8,8 +8,18 @@ function showError(msg) {
 }
 
 window.addEventListener('error', function (e) {
-  // Safari's error.stack is just frames — it never includes the message,
-  // unlike Chrome. Build the message explicitly so it's never dropped.
+  // Ignore incidental resource 404s (favicon, manifest, etc.) — only treat
+  // this as fatal if it's a real JS exception, or the main app script itself
+  // failed to load. Wiping the DOM for unrelated resource errors was
+  // deleting #root before main.jsx could mount, causing React error #299.
+  var isRealException = !!e.error;
+  var isMainScriptFailure =
+    e.target && e.target.tagName === 'SCRIPT' && /main\.jsx|\/assets\/index-/.test(e.target.src || '');
+
+  if (!isRealException && !isMainScriptFailure) {
+    return; // let it go — e.g. a missing favicon, don't nuke the page for it
+  }
+
   var name = (e.error && e.error.name) || 'Error';
   var message = (e.error && e.error.message) || e.message || 'Resource failed to load: ' + (e.target && e.target.src);
   var stack = (e.error && e.error.stack) || '';
