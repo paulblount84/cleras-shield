@@ -94,4 +94,4 @@ function Homepage({ onGetStarted, onSignIn }) {
     </div>
   );
 }
-export default Homepage 
+export default homepage 
