@@ -19,9 +19,9 @@ export default async function handler(req, res) {
   );
 
   if (!result.ok) {
-    const raw = (result.data && (result.data.message || result.data.hint)) || "";
-    if (raw.includes("24 hours")) {
-      return res.status(409).json({ message: "You can check in again 24 hours after your last check-in." });
+    const code = result.data && result.data.code;
+    if (code === "23505") {
+      return res.status(409).json({ message: "You've already checked in today. See you on your next shift." });
     }
     return res.status(result.status || 400).json({ message: "Could not save your check-in. Please try again." });
   }
