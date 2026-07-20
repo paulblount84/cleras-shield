@@ -7,10 +7,10 @@ export default async function handler(req, res) {
     supaFetch("/auth/v1/factors", {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ factor_type: "totp" }),
+      body: JSON.stringify({ factor_type: "totp", friendly_name: `totp-${Date.now()}` }),
     })
   );
 
-  if (!result.ok) return res.status(result.status || 400).json({ message: "Could not start two-factor setup. " + JSON.stringify(result.data) });
+  if (!result.ok) return res.status(result.status || 400).json({ message: "Could not start two-factor setup." });
   return res.status(200).json({ id: result.data.id, totp: result.data.totp });
 }
