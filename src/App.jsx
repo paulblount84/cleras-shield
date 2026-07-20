@@ -336,6 +336,8 @@ export default function CleraShieldCheckIn() {
       }));
       resetToIntro();
       setView("trends");
+      // TEMP DEBUG — remove after diagnosing the UTC/date bug:
+      setSaveError("DEBUG saved=" + JSON.stringify(saved));
     } catch (e) {
       setSaveError(e.message || "Could not save your check-in. Please try again.");
     }
