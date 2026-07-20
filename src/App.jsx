@@ -317,6 +317,7 @@ export default function CleraShieldCheckIn() {
         stressScore: values.stress ?? 0,
         recoveryScore: values.recovery ?? 0,
         incidentLabel: incidentLabel ?? "None",
+        checkDate: dateKey(new Date()),
       });
       // Trust only what the server computed and returned — not the client-side
       // preview values used to render the result screen a moment ago.
@@ -662,5 +663,5 @@ export default function CleraShieldCheckIn() {
         )}
       </div>
     </div>
-);
+  );
 }
