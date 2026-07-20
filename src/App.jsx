@@ -449,20 +449,23 @@ export default function CleraShieldCheckIn() {
 
   const incidentCount14 = present14.filter((d) => d.entry.incidentFlag).length;
 
-  const lastCheckIn = useMemo(() => {
-    const entries = Object.values(history).filter((e) => e.createdAt);
-    if (!entries.length) return null;
-    return entries.reduce((latest, e) =>
-      new Date(e.createdAt).getTime() > new Date(latest.createdAt).getTime() ? e : latest
-    );
-  }, [history]);
-
-  const unlockAt = lastCheckIn ? new Date(lastCheckIn.createdAt).getTime() + LOCK_MS : null;
-  const lockRemainingMs = unlockAt ? unlockAt - lockNow : 0;
-  const isCheckInLocked = !!unlockAt && lockRemainingMs > 0;
-  const lockProgress = unlockAt ? 1 - lockRemainingMs / LOCK_MS : 1;
+  // Locked once there's already a saved entry for today's local calendar
+  // date — matches the database's one-per-day rule exactly, and sidesteps
+  // the old 24h-rolling-timer bug where an evening check-in could block a
+  // legitimate next-morning one just for landing within 24 hours.
+  const todayKey = dateKey(new Date());
+  const isCheckInLocked = !!history[todayKey];
+  const nextMidnight = useMemo(() => {
+    const d = new Date();
+    d.setHours(24, 0, 0, 0); // rolls forward to the start of tomorrow, local time
+    return d.getTime();
+  }, [todayKey]);
+  const startOfToday = useMemo(() => nextMidnight - LOCK_MS, [nextMidnight]);
+  const lockRemainingMs = isCheckInLocked ? Math.max(0, nextMidnight - lockNow) : 0;
+  const lockProgress = isCheckInLocked ? (lockNow - startOfToday) / LOCK_MS : 1;
   const lockColor = lockProgressColor(lockProgress);
-  const lastCondition = lastCheckIn ? getCondition(lastCheckIn.pct) : null;
+  const lastCondition = history[todayKey] ? getCondition(history[todayKey].pct) : null;
+  const lastCheckIn = history[todayKey] || null;
 
   return (
     <div className="cs-root">
