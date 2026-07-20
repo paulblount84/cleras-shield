@@ -23,9 +23,9 @@ export default async function handler(req, res) {
     if (code === "23505") {
       return res.status(409).json({ message: "You've already checked in today. See you on your next shift." });
     }
-    return res.status(result.status || 400).json({ message: "Could not save your check-in. Please try again." });
+    return res.status(result.status || 400).json({ message: "Could not save your check-in. Please try again. DEBUG received body: " + JSON.stringify(req.body || {}) });
   }
 
   const row = Array.isArray(result.data) ? result.data[0] : result.data;
-  return res.status(200).json(row);
+  return res.status(200).json({ ...row, _debug_received_body: req.body || null });
 }
