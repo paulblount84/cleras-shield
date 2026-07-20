@@ -89,10 +89,10 @@ export function fetchCheckIns(fromDate) {
   return api(`/api/checkins/list?from=${fromDate}`);
 }
 
-export function submitCheckIn({ sleepScore, stressScore, recoveryScore, incidentLabel }) {
+export function submitCheckIn({ sleepScore, stressScore, recoveryScore, incidentLabel, checkDate }) {
   return api("/api/checkins/submit", {
     method: "POST",
-    body: JSON.stringify({ sleepScore, stressScore, recoveryScore, incidentLabel }),
+    body: JSON.stringify({ sleepScore, stressScore, recoveryScore, incidentLabel, checkDate }),
   });
 }
 
