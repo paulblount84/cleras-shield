@@ -11,7 +11,6 @@ export default async function handler(req, res) {
     })
   );
 
-  if (!result.ok) return res.status(result.status || 400).json({ message: "Could not start two-factor setup. {"error_code":"...","msg":"..."}
- });
+  if (!result.ok) return res.status(result.status || 400).json({ message: "Could not start two-factor setup. " + JSON.stringify(result.data) });
   return res.status(200).json({ id: result.data.id, totp: result.data.totp });
 }
