@@ -2,7 +2,7 @@ import { withAuth, supaFetch } from "../_lib/supabase.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ message: "Method not allowed" });
-  const { sleepScore, stressScore, recoveryScore, incidentLabel } = req.body || {};
+  const { sleepScore, stressScore, recoveryScore, incidentLabel, checkDate } = req.body || {};
 
   const result = await withAuth(req, res, (token) =>
     supaFetch("/rest/v1/rpc/submit_check_in", {
@@ -13,6 +13,7 @@ export default async function handler(req, res) {
         p_stress_score: stressScore,
         p_recovery_score: recoveryScore,
         p_incident_label: incidentLabel,
+        p_check_date: checkDate,
       }),
     })
   );
